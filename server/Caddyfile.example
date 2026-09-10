@@ -1,0 +1,44 @@
+# Serve the Tally app and its search API from one domain.
+#
+# Same origin is the tidiest arrangement: CORS stops mattering entirely,
+# there's one certificate, and the phone only ever talks to one host.
+# You still set the app's server URL (More -> Food search) to this domain.
+#
+# Caddy obtains and renews the TLS certificate itself, which is all the
+# camera needs to work.
+
+tally.example.com {
+	encode gzip zstd
+
+	# the API — offproxy listens on loopback only
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /health {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# the app itself
+	handle {
+		root * /srv/tally
+		file_server
+
+		# The service worker must not be cached by the CDN/browser layer,
+		# or updates can take a very long time to reach an installed phone.
+		@sw path /sw.js
+		header @sw Cache-Control "no-cache"
+
+		# Hashed-forever assets these are not, so keep revalidation cheap.
+		@static path *.css *.js *.png *.json
+		header @static Cache-Control "public, max-age=3600, must-revalidate"
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}
+
+# Deploying the app files:
+#   rsync -av --delete --exclude server --exclude test --exclude '.git' \
+#         ./ your-server:/srv/tally/

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>Tally — food &amp; calorie diary</title>
+<meta name="description" content="A fast, private food and calorie diary with barcode scanning.">
+<meta name="theme-color" content="#0f1512" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f8f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tally">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ======================= TODAY ======================= -->
+  <section class="view" id="view-today">
+    <header class="topbar">
+      <button class="iconbtn" id="dayPrev" aria-label="Previous day">‹</button>
+      <button class="daybtn" id="dayLabel" aria-label="Change date">Today</button>
+      <button class="iconbtn" id="dayNext" aria-label="Next day">›</button>
+    </header>
+
+    <div class="scroll" id="todayScroll">
+      <div class="summary">
+        <div class="ring-wrap">
+          <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="ring-bg" cx="60" cy="60" r="52"></circle>
+            <circle class="ring-fg" id="ringFg" cx="60" cy="60" r="52"></circle>
+          </svg>
+          <div class="ring-text">
+            <div class="ring-num" id="kcalLeft">0</div>
+            <div class="ring-sub" id="kcalLeftLabel">left</div>
+          </div>
+        </div>
+        <div class="sumline">
+          <div><span id="sumGoal">0</span><small>goal</small></div>
+          <div class="op">−</div>
+          <div><span id="sumFood">0</span><small>food</small></div>
+          <div class="op">=</div>
+          <div><span id="sumLeft">0</span><small>left</small></div>
+        </div>
+        <div class="macros" id="macroBars"></div>
+      </div>
+
+      <div id="meals"></div>
+
+      <div class="daynote" id="dayNote"></div>
+      <div class="spacer"></div>
+    </div>
+  </section>
+
+  <!-- ======================= FOODS ======================= -->
+  <section class="view" id="view-foods" hidden>
+    <header class="topbar"><h1>My foods</h1></header>
+    <div class="scroll">
+      <div class="pad">
+        <button class="wide primary" id="newCustomFood">+ Create a food</button>
+        <h2 class="sec">Frequent</h2>
+        <div id="frequentList" class="list"></div>
+        <h2 class="sec">Your foods</h2>
+        <div id="customList" class="list"></div>
+      </div>
+      <div class="spacer"></div>
+    </div>
+  </section>
+
+  <!-- ======================= TRENDS ======================= -->
+  <section class="view" id="view-trends" hidden>
+    <header class="topbar"><h1>Trends</h1></header>
+    <div class="scroll">
+      <div class="pad">
+        <h2 class="sec">Last 14 days</h2>
+        <div class="chartcard"><div id="chart14" class="chart"></div></div>
+        <div class="statgrid" id="statGrid"></div>
+
+        <h2 class="sec">Weight</h2>
+        <div class="weightrow">
+          <input type="number" inputmode="decimal" id="weightInput" placeholder="kg" step="0.1">
+          <button class="primary" id="weightSave">Log</button>
+        </div>
+        <div class="chartcard"><div id="chartW" class="chart"></div></div>
+      </div>
+      <div class="spacer"></div>
+    </div>
+  </section>
+
+  <!-- ======================= SETTINGS ======================= -->
+  <section class="view" id="view-settings" hidden>
+    <header class="topbar"><h1>Settings</h1></header>
+    <div class="scroll">
+      <div class="pad" id="settingsBody"></div>
+      <div class="spacer"></div>
+    </div>
+  </section>
+
+  <!-- ======================= NAV ======================= -->
+  <nav class="tabbar">
+    <button class="tab is-on" data-view="today"><span class="ico">◍</span>Today</button>
+    <button class="tab" data-view="foods"><span class="ico">☰</span>Foods</button>
+    <button class="fab" id="fabScan" aria-label="Scan a barcode"><span>❙❙❙</span></button>
+    <button class="tab" data-view="trends"><span class="ico">◑</span>Trends</button>
+    <button class="tab" data-view="settings"><span class="ico">⚙</span>More</button>
+  </nav>
+</div>
+
+<!-- ======================= ADD SHEET ======================= -->
+<div class="sheet" id="addSheet" hidden>
+  <div class="sheet-back" data-close></div>
+  <div class="sheet-body">
+    <div class="grab"></div>
+    <div class="sheet-head">
+      <h2 id="addTitle">Add to breakfast</h2>
+      <button class="iconbtn" data-close aria-label="Close">✕</button>
+    </div>
+
+    <div class="searchrow">
+      <input type="search" id="searchInput" placeholder="Search foods…" autocomplete="off" enterkeyhint="search">
+      <button class="scanbtn" id="searchScan" aria-label="Scan barcode">❙❙❙</button>
+    </div>
+
+    <div class="chips" id="srcChips">
+      <button class="chip is-on" data-src="all">All</button>
+      <button class="chip" data-src="recent">Recent</button>
+      <button class="chip" data-src="mine">My foods</button>
+      <button class="chip" data-src="quick">Quick add</button>
+    </div>
+
+    <div class="results" id="results"></div>
+  </div>
+</div>
+
+<!-- ======================= PORTION SHEET ======================= -->
+<div class="sheet" id="portionSheet" hidden>
+  <div class="sheet-back" data-close></div>
+  <div class="sheet-body">
+    <div class="grab"></div>
+    <div class="sheet-head">
+      <h2 id="portionName">Food</h2>
+      <button class="iconbtn" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="portion" id="portionBody"></div>
+  </div>
+</div>
+
+<!-- ======================= SCANNER ======================= -->
+<div class="scanner" id="scanner" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="scan-ui">
+    <div class="scan-top">
+      <button class="ghostbtn" id="scanClose">✕ Close</button>
+      <button class="ghostbtn" id="torchBtn" hidden>Torch</button>
+    </div>
+    <div class="reticle"><div class="laser"></div></div>
+    <div class="scan-bottom">
+      <p id="scanMsg">Point at a barcode</p>
+      <button class="ghostbtn" id="manualBtn">Enter number instead</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden><span id="toastMsg"></span><button id="toastAction" hidden></button></div>
+
+<script src="foods.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

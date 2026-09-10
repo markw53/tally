@@ -1,0 +1,53 @@
+[Unit]
+Description=offproxy — Open Food Facts front-end for Tally
+Documentation=https://openfoodfacts.github.io/openfoodfacts-server/api/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=offproxy
+Group=offproxy
+ExecStart=/usr/local/bin/offproxy
+Restart=on-failure
+RestartSec=3s
+
+# --- edit these two, or override with: systemctl edit offproxy ---
+# Use a real contact address: it is how Open Food Facts reaches you if the
+# client misbehaves, and the service refuses to start without it.
+#
+# The quotes matter. systemd splits Environment= on whitespace, so an unquoted
+# value would set OFFPROXY_UA=Tally/1.1 and silently discard the address.
+Environment="OFFPROXY_UA=Tally/1.1 (you@example.com)"
+#
+# Scheme and host only, no path and no trailing slash — this is matched against
+# the browser's Origin header, which never includes a path. For GitHub Pages
+# that means https://you.github.io, NOT https://you.github.io/tally/
+Environment="OFFPROXY_ORIGINS=https://you.github.io"
+Environment="OFFPROXY_ADDR=127.0.0.1:8080"
+
+# --- hardening: it makes outbound HTTPS calls and nothing else ---
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

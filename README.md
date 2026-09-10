@@ -1,0 +1,216 @@
+# Tally
+
+A MyFitnessPal-shaped food and calorie diary. Barcode scanning, no subscription,
+no account, no analytics. Everything is stored in your browser; nothing is sent
+anywhere except the food lookups you ask for.
+
+Installs to the home screen on iOS and Android as a normal-looking app.
+
+---
+
+## What's in the box
+
+```
+index.html            markup
+styles.css            all styling, light + dark
+foods.js              ~110 everyday UK foods, built in and offline
+app.js                everything else
+sw.js                 service worker (offline shell)
+manifest.json         makes it installable
+icons/                app icons
+.nojekyll             stops GitHub Pages running the files through Jekyll
+server/               optional Open Food Facts search service (Go)
+test/run.js           64 headless tests
+```
+
+Every path in the project is relative, so it works served from a domain root
+*or* from a subpath like `user.github.io/tally/` with no changes.
+
+No build step, no dependencies, no npm install. It's static files.
+
+## Features
+
+- **Barcode scanning** — Open Food Facts, ~4 million products, strong UK coverage.
+  Uses the browser's native `BarcodeDetector` on Android (instant, no download)
+  and falls back to ZXing on iOS.
+- **Portion handling that isn't annoying** — a scanned product offers its own
+  serving size, the whole pack, 100 g, or free grams, with 0.5×/2×/3× shortcuts.
+- **~110 built-in UK foods** — milk, bread, beans, chicken, a pint of lager —
+  searchable instantly with no network at all.
+- **Typed search** via USDA FoodData Central, or via your own Open Food Facts
+  search server (see `server/`) for much better UK coverage.
+- **Quick add** for when you only know the calorie figure.
+- **Recents and frequents**, so a repeat food is two taps.
+- **Custom foods** for anything with no barcode.
+- **Goal + macro targets**, with a Mifflin–St Jeor calculator if you want one.
+- **14-day trend chart**, weight log, JSON export/import.
+- **Works offline** once installed — scanned products are cached, so re-scanning
+  something you've had before works with no signal.
+
+---
+
+## 1. Put it online
+
+The camera only works over HTTPS, so it has to be hosted somewhere. It's static
+files, so this is free and takes a couple of minutes. Pick one:
+
+### Netlify Drop — fastest, no account needed to try
+1. Go to <https://app.netlify.com/drop>
+2. Drag the whole `tally` folder onto the page.
+3. You get an HTTPS URL immediately. Create a free account to keep it permanently
+   and give it a nicer name.
+
+### GitHub Pages — free, permanent, version-controlled
+```bash
+cd tally
+git init -b main
+git add -A && git commit -m "Tally"
+gh repo create tally --public --source=. --push
+```
+Then **Settings → Pages → Source: Deploy from a branch → `main` / `(root)` → Save**.
+Live at `https://<you>.github.io/tally/` after a minute or so.
+
+The repo has to be **public** — Pages on a private repo needs a paid plan.
+To update later: edit, commit, push. Pages redeploys in about half a minute.
+
+### Cloudflare Pages
+`npx wrangler pages deploy .` — free tier, fast CDN, custom domains.
+
+### Your own Hetzner box
+It's a static site, so any web server will do. With Caddy the whole config is:
+```
+tally.example.com {
+    root * /srv/tally
+    file_server
+}
+```
+Caddy gets the TLS certificate itself, which is all the camera needs.
+
+### Updating an installed copy
+
+The service worker serves the cached app shell first and refreshes in the
+background, so after you push a change the phone picks it up on the *next*
+launch, not the current one. If you want it immediately, bump the version
+string at the top of `sw.js`:
+
+```js
+const CACHE = "tally-v1.1.1";   // any change to this forces a full refresh
+```
+
+### One thing to know before you pick
+
+An installed web app is tied to its origin. Moving from
+`user.github.io/tally/` to `tally.yourdomain.com` later means a fresh install
+and an empty diary — so export your data first and import it on the new one.
+If you think you'll want your own domain eventually, it's less faff to start
+there.
+
+## 2. Install it on your phone
+
+**iOS** — open the URL **in Safari** (this bit matters; other iOS browsers make a
+bookmark rather than a real web app). Share button → **Add to Home Screen**.
+Launch it from the icon and it runs full-screen with no browser chrome. The first
+scan will ask for camera permission.
+
+**Android** — open in Chrome, then menu → **Install app** (or *Add to home screen*).
+Same result, and Android additionally supports the "Scan a barcode" long-press
+shortcut on the icon.
+
+## 3. Two minutes of setup
+
+1. **More → Daily goal** — set your calorie target and macro split. There's a
+   Mifflin–St Jeor calculator underneath if you'd rather work one out.
+2. **More → Food search** — optional. Barcode scanning needs nothing. Typed
+   searches use USDA FoodData Central, which runs on a shared demo key that is
+   rate-limited to about 30 requests an hour across everyone using it. A personal
+   key is free and instant: <https://fdc.nal.usda.gov/api-key-signup.html>.
+   Paste it in and typed search stops throttling.
+
+---
+
+## Where the data comes from
+
+| Source | Used for | Key needed | Notes |
+|---|---|---|---|
+| [Open Food Facts](https://world.openfoodfacts.org) | barcode lookups | no | ODbL licensed, community-maintained |
+| Open Food Facts via `server/` | typed search, if you run offproxy | no | best UK coverage; replaces USDA when configured |
+| [USDA FoodData Central](https://fdc.nal.usda.gov) | typed search otherwise | free, optional | US government data, public domain |
+| `foods.js` | ~110 everyday UK foods | no | typical reference values, offline |
+
+**Why typed search doesn't hit Open Food Facts directly.** OFF asks every client
+to identify itself with a custom `User-Agent`, and browsers are forbidden from
+setting that header. Their search endpoints accordingly turn away anonymous
+traffic and send no CORS headers to third-party origins — `cgi/search.pl`
+answers "not available to anonymous users", and neither `search.openfoodfacts.org`
+nor `/api/v2/search` will talk to a web page. Their *barcode* endpoint has no
+such restriction, which is why scanning works directly and typed search doesn't.
+
+## Optional: your own search server
+
+`server/` contains **offproxy** — a small dependency-free Go service that fixes
+the cause rather than working around it. It identifies itself properly, stays
+inside OFF's published rate limits, caches aggressively, and re-ranks results
+(upstream puts Mission wraps above the actual loaf when you search for Hovis).
+
+Run it and typed search comes from Open Food Facts itself, with better UK
+coverage than USDA and no API key anywhere. Barcode lookups route through it
+too, picking up the shared cache.
+
+```bash
+cd server && go test ./... && go build -o offproxy .
+```
+
+Then set the address in the app under **More → Food search**. See
+[`server/README.md`](server/README.md) for deployment, a hardened systemd unit,
+and a Caddyfile that serves the app and the API from one domain.
+
+Leave the server field empty and nothing changes — USDA handles typed search
+exactly as before.
+
+## Your data
+
+Everything lives in this browser's `localStorage` under the key `tally.v1`.
+
+- It is never sent anywhere.
+- Clearing site data, or switching phone, loses it.
+- **More → Your data → Export JSON** takes a backup. Worth doing occasionally.
+- Import restores a backup on any device.
+
+Built-in food values are typical figures for generic foods, not any specific
+brand. For anything packaged, scanning the barcode will always be more accurate.
+
+## Running the tests
+
+```bash
+python3 -m http.server 8765     # in this folder
+node test/run.js                # needs playwright
+```
+
+64 tests covering portion arithmetic, the diary, editing, undo, persistence,
+the barcode path, and the layout.
+
+---
+
+## If you later want a real App Store / Play Store build
+
+The PWA is genuinely all most people need, and it dodges the £79/year Apple
+Developer fee — which would cost you roughly what MyFitnessPal does. But if you
+want a store listing, [Capacitor](https://capacitorjs.com) wraps these exact
+files with no rewrite:
+
+```bash
+npm init -y
+npm i @capacitor/core @capacitor/cli @capacitor/camera
+npx cap init Tally com.yourname.tally --web-dir=.
+npx cap add android      # needs Android Studio
+npx cap add ios          # needs a Mac + Xcode
+npx cap run android
+```
+
+Android you can build and sideload today for nothing. iOS needs a Mac, and
+sideloading a self-signed build means re-signing every 7 days unless you pay for
+the developer programme. Worth knowing before you start down that path.
+
+---
+
+Product data © Open Food Facts contributors, [ODbL](https://opendatacommons.org/licenses/odbl/).
