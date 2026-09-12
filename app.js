@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -491,11 +491,19 @@ async function proxySearch(q, signal) {
 /* ---------------- USDA FoodData Central ---------------- */
 const USDA_IDS = { 1008: "k", 1003: "p", 1004: "f", 1005: "c", 1079: "fib", 2000: "sug", 1093: "sal" };
 
-async function usdaSearch(q, signal) {
+/* USDA's endpoint intermittently answers with an nginx 400 that has nothing to
+   do with the request — observed 3 times in 10 identical calls. Treat those as
+   transient and give it one more go rather than reporting a fault. */
+const USDA_TRANSIENT = new Set([400, 500, 502, 503, 504]);
+
+async function usdaSearch(q, signal, attempt = 0) {
   const key = (S.usdaKey || "").trim() || USDA_DEMO;
   const url = "https://api.nal.usda.gov/fdc/v1/foods/search?" + new URLSearchParams({
     query: q, api_key: key, pageSize: "20",
-    dataType: "Foundation,SR Legacy,Survey (FNDDS)"
+    /* "Survey (FNDDS)" is deliberately omitted: its encoded parentheses were the
+       one variant that failed on its own, and Foundation + SR Legacy already
+       cover generic foods. UK foods come from CoFID anyway. */
+    dataType: "Foundation,SR Legacy"
   });
   let res;
   try {
@@ -510,8 +518,13 @@ async function usdaSearch(q, signal) {
   }
 
   if (!res.ok) {
+    if (USDA_TRANSIENT.has(res.status) && attempt === 0) {
+      await new Promise(r => setTimeout(r, 400));
+      if (signal && signal.aborted) { const a = new Error("aborted"); a.name = "AbortError"; throw a; }
+      return usdaSearch(q, signal, 1);
+    }
     let detail = "";
-    try { const j = await res.json(); detail = (j.error && (j.error.message || j.error.code)) || ""; } catch (e) { /* not JSON */ }
+    try { const j = await res.json(); detail = (j.error && (j.error.message || j.error.code)) || ""; } catch (e) { /* often an nginx HTML page */ }
     const err = new Error("http " + res.status);
     err.status = res.status;
     err.detail = detail;
@@ -881,7 +894,8 @@ function renderSettings() {
       <p>Set this and typed search comes from Open Food Facts itself, via your own server — better UK coverage than USDA, and barcode lookups route through it too. Leave it empty to use USDA instead.</p>
       <label class="fld"><span>USDA API key ${serverBase() ? "(unused while a server is set)" : "(optional extra)"}</span>
         <input type="text" id="setUsda" value="${esc(S.usdaKey)}" placeholder="${USDA_DEMO}" autocomplete="off" spellcheck="false"></label>
-      <p>Adds American generic foods on top of the UK data. Free key, about a minute: <a href="https://fdc.nal.usda.gov/api-key-signup.html" target="_blank" rel="noopener">fdc.nal.usda.gov</a>. Leave it empty and typed search simply stays offline.</p>
+      <p>Adds American generic foods on top of the UK data. Free key, about a minute: <a href="https://fdc.nal.usda.gov/api-key-signup.html" target="_blank" rel="noopener">fdc.nal.usda.gov</a>.</p>
+      <p><b>You probably don't need this.</b> The UK data covers typed search on its own, and USDA's endpoint is intermittently unreliable. Clearing this box makes typed search entirely offline.</p>
       <div class="btnrow">
         <button class="primary" id="saveUsda">Save</button>
         <button class="ghost" id="testUsda">Test connection</button>
@@ -1173,6 +1187,18 @@ function renderResults(q) {
       + list.map(f => resRow(f, "")).join("");
   }).catch(err => {
     if (err.name === "AbortError") return;
+
+    /* The UK reference foods are the main event; USDA and your own server are
+       extras. If the local search already answered, an extra falling over is
+       not the user's problem — don't make a working app look broken. Only
+       things they can act on (a bad key, a rate limit, a server they
+       configured) get a quiet line. */
+    if (local.length) {
+      const actionable = err.kind === "key" || err.kind === "rate" || err.server;
+      more.innerHTML = actionable ? `<div class="hint quiet">${searchErrorText(err)}</div>` : "";
+      if (!actionable) console.warn("Optional food search unavailable:", err.message, err.status || "");
+      return;
+    }
     more.innerHTML = `<div class="hint">${searchErrorText(err)}</div>`;
   });
 }

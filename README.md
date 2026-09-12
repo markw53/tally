@@ -22,7 +22,7 @@ icons/                app icons
 .nojekyll             stops GitHub Pages running the files through Jekyll
 server/               optional Open Food Facts search service (Go)
 tools/                regenerate foods-uk.js from the published CoFID spreadsheet
-test/run.js           96 headless tests
+test/run.js           97 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -245,7 +245,7 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-96 tests covering portion arithmetic, the diary, editing, undo, persistence,
+97 tests covering portion arithmetic, the diary, editing, undo, persistence,
 the barcode path, and the layout.
 
 ---

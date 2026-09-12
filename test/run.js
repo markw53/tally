@@ -298,17 +298,23 @@ function ok(name, cond, extra) {
   let t = await searchWith(r => r.fulfill({ status: 429, contentType: "application/json",
     body: JSON.stringify({ error: { code: "OVER_RATE_LIMIT", message: "rate limit exceeded" } }) }), "beetroot");
   // a key is configured by this point, so it should be the personal-key wording
-  ok("rate limit on your own key says so", /Your USDA key has hit its hourly limit/.test(t), t.slice(-200));
+  ok("rate limit still surfaces (it's actionable)", /Your USDA key has hit its hourly limit/.test(t), t.slice(-200));
 
   t = await searchWith(r => r.fulfill({ status: 403, contentType: "application/json",
     body: JSON.stringify({ error: { code: "API_KEY_INVALID", message: "An invalid api_key was supplied" } }) }), "parsnip");
   ok("bad key is reported as a key problem", /rejected/.test(t), t.slice(-160));
 
   t = await searchWith(r => r.abort("failed"), "swede");
-  ok("network failure mentions blockers, not a generic shrug", /offline/.test(t) && /api\.nal\.usda\.gov/.test(t), t.slice(-180));
+  ok("a flaky optional source stays silent when UK results answered",
+     !/offline/.test(t) && /swede/i.test(t), t.slice(-180));
 
   t = await searchWith(r => r.fulfill({ status: 500, contentType: "text/plain", body: "boom" }), "turnip");
-  ok("server error shows the status code", /HTTP 500/.test(t), t.slice(-160));
+  ok("a transient USDA error does not shout over good UK results",
+     !/HTTP 500/.test(t) && /turnip/i.test(t), t.slice(-160));
+
+  // but with no local match at all, the user still gets told what went wrong
+  t = await searchWith(r => r.abort("failed"), "zzzznotafood");
+  ok("with nothing local, the failure is explained", /offline|Couldn't reach/.test(t), t.slice(-180));
 
   console.log("\n— connection self-test —");
   await page.unroute("**/api.nal.usda.gov/**");

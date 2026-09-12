@@ -194,6 +194,7 @@ label.fld span{display:block; font-size:.8rem; color:var(--ink-2); margin-bottom
 .res:active{background:var(--surface-2)}
 .tagpill{font-size:.62rem; text-transform:uppercase; letter-spacing:.05em; padding:2px 6px; border-radius:5px; background:var(--surface-2); color:var(--ink-3); flex:none}
 .hint{color:var(--ink-3); font-size:.86rem; padding:18px 4px; text-align:center; line-height:1.6}
+.hint.quiet{font-size:.78rem; padding:10px 4px; opacity:.75; text-align:left}
 .spin{width:18px;height:18px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;margin:24px auto}
 @keyframes sp{to{transform:rotate(360deg)}}
 
