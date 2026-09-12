@@ -13,14 +13,16 @@ Installs to the home screen on iOS and Android as a normal-looking app.
 ```
 index.html            markup
 styles.css            all styling, light + dark
-foods.js              ~110 everyday UK foods, built in and offline
+foods.js              121 everyday foods with portion sizes (a slice, half a tin)
+foods-uk.js           2,854 UK reference foods from McCance & Widdowson
 app.js                everything else
 sw.js                 service worker (offline shell)
 manifest.json         makes it installable
 icons/                app icons
 .nojekyll             stops GitHub Pages running the files through Jekyll
 server/               optional Open Food Facts search service (Go)
-test/run.js           85 headless tests
+tools/                regenerate foods-uk.js from the published CoFID spreadsheet
+test/run.js           96 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -35,10 +37,13 @@ No build step, no dependencies, no npm install. It's static files.
   and falls back to ZXing on iOS.
 - **Portion handling that isn't annoying** — a scanned product offers its own
   serving size, the whole pack, 100 g, or free grams, with 0.5×/2×/3× shortcuts.
-- **~110 built-in UK foods** — milk, bread, beans, chicken, a pint of lager —
-  searchable instantly with no network at all.
-- **Typed search** via USDA FoodData Central, or via your own Open Food Facts
-  search server (see `server/`) for much better UK coverage.
+- **~2,900 UK foods built in** — the whole of McCance & Widdowson's Composition
+  of Foods, the UK's authoritative reference data, searchable instantly with no
+  network, no API key and no rate limit.
+- **Real portion sizes** on the everyday items — a slice of bread, a medium
+  banana, half a tin — which the reference data itself doesn't carry.
+- **Typed search needs nothing.** Optionally add your own Open Food Facts search
+  server (see `server/`) for branded products, or a USDA key for American foods.
 - **Quick add** for when you only know the calorie figure.
 - **Recents and frequents**, so a repeat food is two taps.
 - **Custom foods** for anything with no barcode.
@@ -96,7 +101,7 @@ launch, not the current one. If you want it immediately, bump the version
 string at the top of `sw.js`:
 
 ```js
-const CACHE = "tally-v1.2.1";   // any change to this forces a full refresh
+const CACHE = "tally-v1.3.1";   // any change to this forces a full refresh
 ```
 
 ### One thing to know before you pick
@@ -122,11 +127,9 @@ shortcut on the icon.
 
 1. **More → Daily goal** — set your calorie target and macro split. There's a
    Mifflin–St Jeor calculator underneath if you'd rather work one out.
-2. **More → Food search** — optional. Barcode scanning needs nothing. Typed
-   searches use USDA FoodData Central, which runs on a shared demo key that is
-   rate-limited to about 30 requests an hour across everyone using it. A personal
-   key is free and instant: <https://fdc.nal.usda.gov/api-key-signup.html>.
-   Paste it in and typed search stops throttling.
+That's it. Typed search and barcode scanning both work with no keys and no
+accounts. **More → Food search** is there if you later want branded-product
+search (your own server) or American foods (a free USDA key) — neither is needed.
 
 ---
 
@@ -134,10 +137,34 @@ shortcut on the icon.
 
 | Source | Used for | Key needed | Notes |
 |---|---|---|---|
-| [Open Food Facts](https://world.openfoodfacts.org) | barcode lookups | no | ODbL licensed, community-maintained |
-| Open Food Facts via `server/` | typed search, if you run offproxy | no | best UK coverage; replaces USDA when configured |
-| [USDA FoodData Central](https://fdc.nal.usda.gov) | typed search otherwise | free, optional | US government data, public domain |
-| `foods.js` | ~110 everyday UK foods | no | typical reference values, offline |
+| `foods-uk.js` — [CoFID](https://www.gov.uk/government/publications/composition-of-foods-integrated-dataset-cofid) | typed search | no | 2,854 UK foods, offline, Open Government Licence v3.0 |
+| `foods.js` | the everyday items | no | portion sizes on top of CoFID values |
+| [Open Food Facts](https://world.openfoodfacts.org) | barcode lookups | no | branded products, ODbL licensed |
+| Open Food Facts via `server/` | branded typed search | no | optional; needs offproxy running |
+| [USDA FoodData Central](https://fdc.nal.usda.gov) | American generic foods | free, optional | only if you paste a key in |
+
+### Where the numbers come from
+
+Nutrition values are **McCance & Widdowson's The Composition of Foods Integrated
+Dataset (CoFID 2021)**, published by Public Health England — the same data
+behind UK food labelling and the National Diet and Nutrition Survey. The
+everyday-foods list adds portion sizes on top; its values are taken from CoFID
+too wherever a clean equivalent exists (`tools/portion-map.json`), so the app
+gives one answer per food rather than two.
+
+This matters more than it sounds. UK and US figures differ: wholemeal bread is
+217 kcal/100 g here against USDA's 247, a banana 81 against 89, chicken breast
+148 against 165. On staples logged daily that adds up.
+
+To regenerate after a new CoFID release:
+
+```bash
+python3 tools/build-cofid.py CoFID.xlsx > foods-uk.js
+node tools/apply-cofid-values.js
+```
+
+Contains public sector information licensed under the
+[Open Government Licence v3.0](http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 
 **Why typed search doesn't hit Open Food Facts directly.** OFF asks every client
 to identify itself with a custom `User-Agent`, and browsers are forbidden from
@@ -218,7 +245,7 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-85 tests covering portion arithmetic, the diary, editing, undo, persistence,
+96 tests covering portion arithmetic, the diary, editing, undo, persistence,
 the barcode path, and the layout.
 
 ---

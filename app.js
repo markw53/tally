@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -449,9 +449,16 @@ async function switchProfile(id) {
 
 /* ---------------- text search ---------------- */
 
-/* Your server if you have one, USDA otherwise. */
+/* With ~2,900 UK reference foods built in, a network search is a bonus rather
+   than the main event. Your server if you have one; USDA only if you've gone
+   to the trouble of getting a key; otherwise nothing, and no key to set up. */
+function remoteSearchAvailable() {
+  return !!serverBase() || !!(S.usdaKey || "").trim();
+}
 async function searchRemote(q, signal) {
-  return serverBase() ? proxySearch(q, signal) : usdaSearch(q, signal);
+  if (serverBase()) return proxySearch(q, signal);
+  if ((S.usdaKey || "").trim()) return usdaSearch(q, signal);
+  return [];
 }
 function searchSourceLabel() {
   return serverBase() ? "Open Food Facts" : "Reference foods (USDA)";
@@ -539,21 +546,53 @@ function scoreMatch(name, brand, q) {
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.every(t => hay.includes(t))) return 0;
   let s = 10;
+  /* CoFID names read "Bread, wholemeal, average" — the bit before the first
+     comma is the food itself, so a match there beats a match in the qualifiers.
+     Without this, searching "bread" surfaces "Sauce, bread" above actual loaves. */
+  const head = name.toLowerCase().split(",")[0];
+  if (terms.some(t => head.includes(t))) s += 5;
   if (hay.startsWith(terms[0])) s += 6;
   if (hay === q.toLowerCase()) s += 10;
   s -= Math.min(4, hay.length / 40);
   return s;
 }
 
+/* A CoFID row becomes a food object only when it's actually going to be shown —
+   building 2,800 objects on every keystroke would be wasteful. */
+function ukFood(row, i) {
+  const [name, cat, k, p, c, f, fib, sug, sal] = row;
+  return {
+    id: "uk_" + i, name, cat, source: "cofid",
+    per100: {
+      k, p, c, f,
+      fib: fib == null ? null : fib,
+      sug: sug == null ? null : sug,
+      sal: sal == null ? null : sal
+    },
+    portions: [{ label: "100 g", g: 100 }, GRAM_PORTION]
+  };
+}
+
 function localSearch(q) {
-  const pool = [...S.custom, ...BUILTIN];
   if (!q) return [];
-  return pool
-    .map(f => ({ f, s: scoreMatch(f.name, f.brand, q) + (S.counts[foodKey(f)] || 0) * 0.4 }))
-    .filter(x => x.s > 0)
-    .sort((a, b) => b.s - a.s)
-    .slice(0, 30)
-    .map(x => x.f);
+  const scored = [];
+
+  /* Your own foods and the curated list rank slightly above CoFID, because
+     they carry real portion sizes ("slice (40 g)") rather than just per-100 g. */
+  [...S.custom, ...BUILTIN].forEach(f => {
+    const s = scoreMatch(f.name, f.brand, q);
+    if (s > 0) scored.push({ f, s: s + 3 + (S.counts[foodKey(f)] || 0) * 0.4 });
+  });
+
+  if (typeof UK_FOODS !== "undefined") {
+    for (let i = 0; i < UK_FOODS.length; i++) {
+      const s = scoreMatch(UK_FOODS[i][0], "", q);
+      if (s > 0) scored.push({ row: UK_FOODS[i], i, s });
+    }
+  }
+
+  scored.sort((a, b) => b.s - a.s);
+  return scored.slice(0, 40).map(x => x.f || ukFood(x.row, x.i));
 }
 
 function frequentFoods(limit = 12) {
@@ -836,13 +875,13 @@ function renderSettings() {
 
     <div class="card">
       <h3>Food search</h3>
-      <p>Barcode scanning needs neither of these. They only affect <em>typed</em> searches.</p>
+      <p>Neither of these is needed. Typed search already covers ~2,900 UK foods from McCance &amp; Widdowson, offline, and barcodes come from Open Food Facts. These only add <em>more</em> results.</p>
       <label class="fld"><span>Your search server (offproxy)</span>
         <input type="text" id="setServer" value="${esc(S.serverUrl)}" placeholder="https://tally.yourdomain.com" autocomplete="off" spellcheck="false" inputmode="url"></label>
       <p>Set this and typed search comes from Open Food Facts itself, via your own server — better UK coverage than USDA, and barcode lookups route through it too. Leave it empty to use USDA instead.</p>
-      <label class="fld"><span>USDA API key ${serverBase() ? "(unused while a server is set)" : "(optional)"}</span>
+      <label class="fld"><span>USDA API key ${serverBase() ? "(unused while a server is set)" : "(optional extra)"}</span>
         <input type="text" id="setUsda" value="${esc(S.usdaKey)}" placeholder="${USDA_DEMO}" autocomplete="off" spellcheck="false"></label>
-      <p>Free key, about a minute: <a href="https://fdc.nal.usda.gov/api-key-signup.html" target="_blank" rel="noopener">fdc.nal.usda.gov</a>. Without one it falls back to a shared demo key limited to roughly 30 searches an hour.</p>
+      <p>Adds American generic foods on top of the UK data. Free key, about a minute: <a href="https://fdc.nal.usda.gov/api-key-signup.html" target="_blank" rel="noopener">fdc.nal.usda.gov</a>. Leave it empty and typed search simply stays offline.</p>
       <div class="btnrow">
         <button class="primary" id="saveUsda">Save</button>
         <button class="ghost" id="testUsda">Test connection</button>
@@ -894,8 +933,10 @@ function renderSettings() {
       <h3>About</h3>
       <p>Tally v${VERSION} — offline-capable, no account, no analytics.<br>
       Product data from <a href="https://world.openfoodfacts.org" target="_blank" rel="noopener">Open Food Facts</a> (ODbL).
-      Reference foods from USDA FoodData Central and a built-in table of ${BUILTIN.length} everyday items.</p>
-      <p>Built-in values are typical figures for generic foods. For anything packaged, scan the barcode.</p>
+      UK reference foods from <a href="https://www.gov.uk/government/publications/composition-of-foods-integrated-dataset-cofid" target="_blank" rel="noopener">McCance &amp; Widdowson's Composition of Foods Integrated Dataset</a> (CoFID 2021), plus ${BUILTIN.length} curated items with portion sizes.</p>
+      <p>Contains public sector information licensed under the
+      <a href="http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/" target="_blank" rel="noopener">Open Government Licence v3.0</a>.</p>
+      <p>Reference values are for generic foods. For anything packaged, scanning the barcode is more accurate.</p>
     </div>`;
 
   const pctNote = () => {
@@ -1081,7 +1122,7 @@ function renderResults(q) {
     const rec = S.recent.slice(0, 20);
     box.innerHTML = rec.length
       ? `<div class="hint" style="padding:10px 4px 4px;text-align:left">Recent</div>` + rec.map(f => resRow(f, "")).join("")
-      : `<div class="hint">Scan a barcode, or start typing to search.<br><br>${BUILTIN.length} everyday foods are built in and work offline.</div>`;
+      : `<div class="hint">Scan a barcode, or start typing to search.<br><br>${BUILTIN.length + (typeof UK_FOODS === "undefined" ? 0 : UK_FOODS.length)} UK foods are built in and work offline.</div>`;
     return;
   }
 
@@ -1101,10 +1142,21 @@ function renderResults(q) {
     local = localSearch(q);
   }
 
-  box.innerHTML = local.length ? local.map(f => resRow(f, f.source === "custom" ? "yours" : "")).join("") : "";
+  box.innerHTML = local.length
+    ? local.map(f => resRow(f, f.source === "custom" ? "yours" : (f.source === "cofid" ? "UK" : ""))).join("")
+    : "";
 
   if (srcFilter !== "all") {
     if (!local.length) box.innerHTML = `<div class="hint">Nothing matching “${esc(q)}” here.</div>`;
+    return;
+  }
+
+  /* Nothing to add from the network, so don't spin a spinner for nothing. */
+  if (!remoteSearchAvailable()) {
+    if (!local.length) {
+      box.innerHTML = `<div class="hint">No UK reference food matching “${esc(q)}”.<br>
+        If it's a packaged product, scanning the barcode will find it.</div>`;
+    }
     return;
   }
 
@@ -1272,7 +1324,7 @@ function drawPortion() {
     </div>
 
     <div class="btnrow"><button class="primary wide" id="pAdd">${pEditing ? "Save changes" : "Add to " + addMeal.toLowerCase()}</button></div>
-    <div class="per100">Per 100 g: ${r0(n.k)} kcal · P ${r1(n.p)} · C ${r1(n.c)} · F ${r1(n.f)}${pFood.source === "off" ? " · Open Food Facts" : pFood.source === "usda" ? " · USDA" : pFood.source === "builtin" ? " · built-in reference" : ""}</div>`;
+    <div class="per100">Per 100 g: ${r0(n.k)} kcal · P ${r1(n.p)} · C ${r1(n.c)} · F ${r1(n.f)}${pFood.source === "off" ? " · Open Food Facts" : pFood.source === "cofid" ? " · McCance &amp; Widdowson (CoFID)" : pFood.source === "usda" ? " · USDA" : pFood.source === "builtin" ? " · built-in reference" : ""}</div>`;
 
   const body = $("#portionBody");
   const step = p.gram ? 10 : 0.5;

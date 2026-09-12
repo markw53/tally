@@ -1,10 +1,11 @@
 /* Tally service worker — app shell offline, network-first for food data. */
-const CACHE = "tally-v1.2.0";
+const CACHE = "tally-v1.3.0";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
   "./foods.js",
+  "./foods-uk.js",
   "./app.js",
   "./manifest.json",
   "./icons/icon-192.png",

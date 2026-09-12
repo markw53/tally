@@ -68,6 +68,63 @@ function ok(name, cond, extra) {
     })
   }));
 
+  console.log("\n— UK reference foods (CoFID) —");
+  ok("UK dataset loaded", await page.evaluate(() => typeof UK_FOODS !== "undefined" && UK_FOODS.length > 2500),
+     String(await page.evaluate(() => (typeof UK_FOODS === "undefined" ? 0 : UK_FOODS.length))));
+
+  // values must match the published dataset exactly
+  const bread = await page.evaluate(() => UK_FOODS.find(f => f[0] === "Bread, wholemeal, average"));
+  ok("wholemeal bread matches the source", JSON.stringify(bread.slice(2, 7)) === JSON.stringify([217, 9.4, 42, 2.5, 7]),
+     JSON.stringify(bread));
+
+  // the head-noun boost: "Sauce, bread" must not outrank actual bread
+  await page.click('.tab[data-view="today"]');
+  await page.click('[data-addmeal="Breakfast"]');
+  await page.fill("#searchInput", "wholemeal bread");
+  await page.waitForTimeout(450);
+  const breadTop = await page.locator("#results .res .nm").first().textContent();
+  ok("searching bread finds bread, not bread sauce", /bread/i.test(breadTop) && !/sauce/i.test(breadTop), breadTop);
+
+  await page.fill("#searchInput", "swede boiled");
+  await page.waitForTimeout(450);
+  const swede = await page.locator("#results .res .nm").first().textContent();
+  ok("obscure UK vegetables are findable", /swede/i.test(swede), swede);
+
+  // a CoFID food logs correctly at an arbitrary gram amount
+  await page.fill("#searchInput", "Bread, wholemeal, average");
+  await page.waitForTimeout(450);
+  await page.locator("#results .res").first().click();
+  await page.waitForSelector("#portionBody .pkcal");
+  ok("CoFID food defaults to 100 g", (await page.locator("#portionBody .pkcal b").textContent()) === "217",
+     await page.locator("#portionBody .pkcal b").textContent());
+  ok("source is credited in the sheet", /McCance/.test(await page.locator("#portionBody").textContent()));
+  ok("fibre carried through", /Fibre/.test(await page.locator("#portionBody").textContent()));
+  const gramChipUK = page.locator("#portionBody [data-port]").filter({ hasText: "grams" });
+  await gramChipUK.click();
+  await page.fill("#pAmt", "80");
+  await page.waitForTimeout(150);
+  // 217 kcal/100g * 80g = 173.6 -> 174
+  ok("gram maths on UK data", (await page.locator("#portionBody .pkcal b").textContent()) === "174",
+     await page.locator("#portionBody .pkcal b").textContent());
+  await page.keyboard.press("Escape");
+
+  console.log("\n— no key, no server: search stays offline —");
+  await page.click('[data-addmeal="Breakfast"]');
+  await page.fill("#searchInput", "cheddar");
+  await page.waitForTimeout(900);
+  const offlineResults = await page.locator("#results").textContent();
+  ok("UK results appear with no network search", /cheddar/i.test(offlineResults), offlineResults.slice(0, 90));
+  ok("no USDA section without a key", !/Reference foods \(USDA\)/.test(offlineResults));
+  ok("no error shown when there's nothing remote to ask",
+     !/Couldn't reach/.test(offlineResults) && !/demo key/.test(offlineResults));
+  await page.keyboard.press("Escape");
+
+  /* USDA is opt-in now, so enable it before the tests that expect its results */
+  await page.click('.tab[data-view="settings"]');
+  await page.fill("#setUsda", "test-key-for-stubbed-usda");
+  await page.click("#saveUsda");
+  await page.waitForTimeout(250);
+
   console.log("\n— log a built-in food —");
   await page.click('.tab[data-view="today"]');
   await page.click('[data-addmeal="Breakfast"]');
@@ -79,11 +136,11 @@ function ok(name, cond, extra) {
   ok("USDA reference results appended", /Reference foods/.test(await page.locator("#results").textContent()));
   await page.locator("#results .res").first().click();
   await page.waitForSelector("#portionBody .pkcal");
-  // default portion is 40 g of 379 kcal/100g = 151.6 -> 152
+  // default portion is 40 g of 381 kcal/100g = 152.4 -> 152
   ok("default portion kcal correct", (await page.locator("#portionBody .pkcal b").textContent()) === "152",
      await page.locator("#portionBody .pkcal b").textContent());
   await page.click('[data-mult="2"]');
-  ok("2× multiplier doubles it", (await page.locator("#portionBody .pkcal b").textContent()) === "303",
+  ok("2× multiplier doubles it", (await page.locator("#portionBody .pkcal b").textContent()) === "305",
      await page.locator("#portionBody .pkcal b").textContent());
   await page.click('[data-mult="1"]');
   await page.click("#pAdd");
@@ -102,12 +159,12 @@ function ok(name, cond, extra) {
   await gramChip.click();
   await page.fill("#pAmt", "200");
   await page.waitForTimeout(120);
-  // 165 kcal/100g * 200g = 330
-  ok("gram amount maths correct", (await page.locator("#portionBody .pkcal b").textContent()) === "330",
+  // 148 kcal/100g * 200g = 296
+  ok("gram amount maths correct", (await page.locator("#portionBody .pkcal b").textContent()) === "296",
      await page.locator("#portionBody .pkcal b").textContent());
   await page.click("#pAdd");
   await page.waitForTimeout(200);
-  ok("total is 152 + 330", (await page.locator("#sumFood").textContent()) === "482",
+  ok("total is 152 + 296", (await page.locator("#sumFood").textContent()) === "448",
      await page.locator("#sumFood").textContent());
   ok("protein tracked", await page.evaluate(() => dayTotals(curDate).p > 60));
 
@@ -118,7 +175,7 @@ function ok(name, cond, extra) {
   await page.fill("#qaP", "20");
   await page.click("#qaAdd");
   await page.waitForTimeout(200);
-  ok("quick add lands", (await page.locator("#sumFood").textContent()) === "982",
+  ok("quick add lands", (await page.locator("#sumFood").textContent()) === "948",
      await page.locator("#sumFood").textContent());
 
   console.log("\n— edit an existing entry —");
@@ -131,20 +188,20 @@ function ok(name, cond, extra) {
   await page.waitForTimeout(120);
   await page.click("#pAdd");
   await page.waitForTimeout(250);
-  // porridge 80 g = 303 ; total = 303 + 330 + 500 = 1133
+  // porridge 80 g = 305 ; total = 305 + 296 + 500 = 1101
   ok("edit replaces rather than duplicates",
      (await page.locator(".meal", { hasText: "Breakfast" }).locator(".entry").count()) === 1);
-  ok("edited total correct", (await page.locator("#sumFood").textContent()) === "1133",
+  ok("edited total correct", (await page.locator("#sumFood").textContent()) === "1101",
      await page.locator("#sumFood").textContent());
 
   console.log("\n— delete + undo —");
   await page.locator(".meal", { hasText: "Dinner" }).locator(".entry .del").first().click();
   await page.waitForTimeout(150);
-  ok("delete removes the entry", (await page.locator("#sumFood").textContent()) === "633",
+  ok("delete removes the entry", (await page.locator("#sumFood").textContent()) === "601",
      await page.locator("#sumFood").textContent());
   await page.click("#toastAction");
   await page.waitForTimeout(150);
-  ok("undo restores it", (await page.locator("#sumFood").textContent()) === "1133",
+  ok("undo restores it", (await page.locator("#sumFood").textContent()) === "1101",
      await page.locator("#sumFood").textContent());
 
   console.log("\n— recents & frequents —");
@@ -158,7 +215,7 @@ function ok(name, cond, extra) {
   ok("label says Yesterday", (await page.locator("#dayLabel").textContent()) === "Yesterday");
   await page.click("#dayNext");
   ok("back to today", (await page.locator("#dayLabel").textContent()) === "Today");
-  ok("today's data intact", (await page.locator("#sumFood").textContent()) === "1133");
+  ok("today's data intact", (await page.locator("#sumFood").textContent()) === "1101");
 
   console.log("\n— trends —");
   await page.click('.tab[data-view="trends"]');
@@ -171,7 +228,7 @@ function ok(name, cond, extra) {
   console.log("\n— persistence across reload —");
   await page.reload({ waitUntil: "networkidle" });
   await page.waitForTimeout(300);
-  ok("diary survives reload", (await page.locator("#sumFood").textContent()) === "1133",
+  ok("diary survives reload", (await page.locator("#sumFood").textContent()) === "1101",
      await page.locator("#sumFood").textContent());
   ok("goal survives reload", (await page.locator("#sumGoal").textContent()) === "2200");
 
@@ -206,7 +263,7 @@ function ok(name, cond, extra) {
      await page.locator("#portionBody .pkcal b").textContent());
   await page.click("#pAdd");
   await page.waitForTimeout(200);
-  ok("barcode item logged", (await page.locator("#sumFood").textContent()) === "1461",
+  ok("barcode item logged", (await page.locator("#sumFood").textContent()) === "1429",
      await page.locator("#sumFood").textContent());
 
   console.log("\n— barcode cached for offline reuse —");
@@ -240,7 +297,8 @@ function ok(name, cond, extra) {
 
   let t = await searchWith(r => r.fulfill({ status: 429, contentType: "application/json",
     body: JSON.stringify({ error: { code: "OVER_RATE_LIMIT", message: "rate limit exceeded" } }) }), "beetroot");
-  ok("rate limit says so and points at the key setting", /hourly limit/.test(t) && /Food search key/.test(t), t.slice(-160));
+  // a key is configured by this point, so it should be the personal-key wording
+  ok("rate limit on your own key says so", /Your USDA key has hit its hourly limit/.test(t), t.slice(-200));
 
   t = await searchWith(r => r.fulfill({ status: 403, contentType: "application/json",
     body: JSON.stringify({ error: { code: "API_KEY_INVALID", message: "An invalid api_key was supplied" } }) }), "parsnip");
@@ -420,10 +478,14 @@ function ok(name, cond, extra) {
     // seed the OLD storage key, as an existing v1.0 install would have
     await p2.goto(URL, { waitUntil: "domcontentloaded" });
     await p2.evaluate(() => {
+      /* Use *today's* date, computed in the browser. Hardcoding one makes the
+         test pass only on the day it was written. */
+      const d = new Date();
+      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       localStorage.clear();
       localStorage.setItem("tally.v1", JSON.stringify({
         goal: 1750,
-        diary: { "2026-09-11": { Breakfast: [{ id: "old1", name: "Legacy porridge", source: "quick", grams: 100, portionLabel: "", per100: { k: 300, p: 10, c: 50, f: 5 } }], Lunch: [], Dinner: [], Snacks: [] } }
+        diary: { [today]: { Breakfast: [{ id: "old1", name: "Legacy porridge", source: "quick", grams: 100, portionLabel: "", per100: { k: 300, p: 10, c: 50, f: 5 } }], Lunch: [], Dinner: [], Snacks: [] } }
       }));
     });
     await p2.reload({ waitUntil: "networkidle" });
