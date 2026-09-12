@@ -26,6 +26,27 @@ Environment="OFFPROXY_UA=Tally/1.1 (you@example.com)"
 Environment="OFFPROXY_ORIGINS=https://you.github.io"
 Environment="OFFPROXY_ADDR=127.0.0.1:8080"
 
+# --- optional: diary sync for one or more people ---
+#
+#   ⚠  DO NOT put real tokens in this file while it lives in your git repo.
+#      A GitHub Pages repo is public, so committing them publishes them.
+#      Fill them in on the SERVER copy instead:
+#          sudo systemctl edit --full offproxy
+#      which edits /etc/systemd/system/offproxy.service — outside the repo.
+#
+# Leave both unset and offproxy stays a stateless search service.
+# Set both to enable sync. Generate each token with:  offproxy -gen-token
+# The account name is only a folder name; the token is what authenticates.
+#Environment="OFFPROXY_DATA=/var/lib/offproxy"
+#Environment="OFFPROXY_ACCOUNTS=mark:PASTE_TOKEN_HERE,claire:PASTE_OTHER_TOKEN_HERE"
+
+# StateDirectory creates /var/lib/offproxy owned by this service and, crucially,
+# makes it writable despite ProtectSystem=strict below. Without it, sync writes
+# fail with a permission error that looks like a bug in the app.
+StateDirectory=offproxy
+StateDirectoryMode=0700
+UMask=0077
+
 # --- hardening: it makes outbound HTTPS calls and nothing else ---
 NoNewPrivileges=yes
 PrivateTmp=yes

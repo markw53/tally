@@ -20,7 +20,7 @@ manifest.json         makes it installable
 icons/                app icons
 .nojekyll             stops GitHub Pages running the files through Jekyll
 server/               optional Open Food Facts search service (Go)
-test/run.js           64 headless tests
+test/run.js           85 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -46,6 +46,8 @@ No build step, no dependencies, no npm install. It's static files.
 - **14-day trend chart**, weight log, JSON export/import.
 - **Works offline** once installed — scanned products are cached, so re-scanning
   something you've had before works with no signal.
+- **Optional sync and multiple people** — separate private diaries, a shared
+  food library, and a switcher for devices two people both use.
 
 ---
 
@@ -94,7 +96,7 @@ launch, not the current one. If you want it immediately, bump the version
 string at the top of `sw.js`:
 
 ```js
-const CACHE = "tally-v1.1.1";   // any change to this forces a full refresh
+const CACHE = "tally-v1.2.1";   // any change to this forces a full refresh
 ```
 
 ### One thing to know before you pick
@@ -167,14 +169,44 @@ and a Caddyfile that serves the app and the API from one domain.
 Leave the server field empty and nothing changes — USDA handles typed search
 exactly as before.
 
+## More than one person
+
+Tally handles a household. Each person gets their own diary, and the two
+things that differ are handled separately:
+
+- **Diaries are private.** Each account's diary is reachable only with that
+  account's own sync token. The server derives who you are from the token —
+  a client never gets to claim an identity — so one person's device cannot
+  fetch the other's diary however it asks.
+- **Custom foods are shared.** Create "Mum's lasagne, 180 kcal per 100 g"
+  once and everyone on your server can log it. That's the point.
+
+On a shared device (an iPad, a family laptop) add each person under
+**More → Who uses this device**. Whoever is currently logging is shown in a
+band across the top of every screen, and tapping it switches. That band is
+deliberately hard to miss — logging your lunch into someone else's diary is
+the one mistake worth designing against.
+
+Each person needs a sync token from `OFFPROXY_ACCOUNTS` pasted into
+**More → Sync**. Without a token a profile simply stays on that device.
+
+Sync merges rather than overwrites, per day: a phone that's been offline for a
+week uploads its days without wiping newer ones from the laptop. The limit is
+that resolution is per *day* — edit the same day on two devices while one is
+offline and the later edit wins that day outright. See
+[`server/README.md`](server/README.md) for the details.
+
 ## Your data
 
-Everything lives in this browser's `localStorage` under the key `tally.v1`.
+Everything lives in this browser's `localStorage`, under `tally.v1.<profile>`.
 
-- It is never sent anywhere.
-- Clearing site data, or switching phone, loses it.
+- Nothing leaves the device unless you configure a sync server of your own.
+- Clearing site data, or switching phone, loses the local copy.
 - **More → Your data → Export JSON** takes a backup. Worth doing occasionally.
 - Import restores a backup on any device.
+- Upgrading from a single-diary version migrates your existing diary into the
+  first profile automatically, and leaves the old storage key untouched as a
+  safety net.
 
 Built-in food values are typical figures for generic foods, not any specific
 brand. For anything packaged, scanning the barcode will always be more accurate.
@@ -186,7 +218,7 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-64 tests covering portion arithmetic, the diary, editing, undo, persistence,
+85 tests covering portion arithmetic, the diary, editing, undo, persistence,
 the barcode path, and the layout.
 
 ---

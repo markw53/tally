@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -39,27 +39,75 @@ function prettyDate(dstr) {
   return new Date(y, m - 1, d).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" });
 }
 
+/* ---------------- profiles ----------------
+   One install can hold more than one person's diary — a shared iPad, say.
+   Each profile's data lives under its own key, so switching can never mix
+   two people's entries together. Device-level settings (which server, which
+   USDA key) are per profile too, but the sync token is what identifies you. */
+const PROFILES_KEY = "tally.profiles";
+const LEGACY_KEY = "tally.v1";
+
+let P = loadProfiles();
+
+function loadProfiles() {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && Array.isArray(p.list) && p.list.length) return p;
+    }
+  } catch (e) { console.warn("Could not read profiles:", e); }
+
+  /* First run, or an upgrade from the single-diary version. Carry the old
+     data across rather than stranding it, and leave the old key in place as
+     a safety net rather than deleting something irreplaceable. */
+  const p = { list: [{ id: "me", label: "Me", token: "" }], active: "me" };
+  try {
+    const legacy = localStorage.getItem(LEGACY_KEY);
+    if (legacy && !localStorage.getItem(dataKeyFor("me"))) {
+      localStorage.setItem(dataKeyFor("me"), legacy);
+    }
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(p));
+  } catch (e) { console.warn("Could not migrate old data:", e); }
+  return p;
+}
+
+function saveProfiles() {
+  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(P)); }
+  catch (e) { console.error(e); }
+}
+function dataKeyFor(id) { return "tally.v1." + id; }
+function dataKey() { return dataKeyFor(P.active); }
+function activeProfile() { return P.list.find(x => x.id === P.active) || P.list[0]; }
+function profileLabel() { const a = activeProfile(); return a ? a.label : "Me"; }
+
 /* ---------------- persistent state ---------------- */
-const KEY = "tally.v1";
 const DEFAULTS = {
   goal: 2000,
   macroPct: { p: 25, c: 45, f: 30 },
   serverUrl: "",    // your offproxy instance; when set it replaces USDA for search
   usdaKey: "",
   diary: {},        // "YYYY-MM-DD" -> { Breakfast:[entry], ... }
-  custom: [],       // user-created foods
+  custom: [],       // user-created foods (shared with the household when syncing)
   recent: [],       // recently logged foods (newest first)
   counts: {},       // foodKey -> times logged
   weights: {},      // "YYYY-MM-DD" -> kg
   offCache: {},     // barcode -> food
-  seenIntro: false
+  seenIntro: false,
+  /* sync bookkeeping: what changed when, so a merge can pick a winner */
+  dayStamps: {},    // "YYYY-MM-DD" -> ms
+  weightStamps: {}, // "YYYY-MM-DD" -> ms
+  settingsStamp: 0,
+  foodStamps: {},   // food id -> ms
+  deletedFoods: {}, // food id -> ms (tombstones, so a delete isn't undone by a stale device)
+  lastSync: 0
 };
 
 let S = load();
 
 function load() {
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(dataKey());
     return raw ? Object.assign(structuredClone(DEFAULTS), JSON.parse(raw)) : structuredClone(DEFAULTS);
   } catch (e) {
     console.warn("Could not read saved data:", e);
@@ -67,13 +115,18 @@ function load() {
   }
 }
 let saveTimer = null;
-function save() {
+function save(andSync = true) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem(KEY, JSON.stringify(S)); }
+    try { localStorage.setItem(dataKey(), JSON.stringify(S)); }
     catch (e) { toast("Couldn't save — storage may be full"); console.error(e); }
   }, 80);
+  if (andSync) scheduleSync();
 }
+
+/* Mark a day as touched now, so the merge knows this device has the newer
+   version of it. Without this an older device could overwrite the day. */
+function touchDay(date) { S.dayStamps[date] = Date.now(); }
 
 /* ---------------- food model ---------------- */
 /* A food:  {id,name,brand,code,source,cat,per100:{k,p,c,f,fib,sug,sal},portions:[{label,g}]} */
@@ -147,7 +200,23 @@ async function lookupBarcode(code) {
   code = String(code).replace(/\D/g, "");
   if (S.offCache[code]) return S.offCache[code];
 
-  const food = serverBase() ? await proxyProduct(code) : await directProduct(code);
+  let food;
+  if (serverBase()) {
+    try {
+      food = await proxyProduct(code);
+    } catch (e) {
+      /* "no such product" and "no nutrition data" are real answers — going to
+         Open Food Facts directly would only get the same reply. But if the
+         server is simply unreachable or busy, fall back: Open Food Facts'
+         product endpoint works from the browser, and a scanner that dies in
+         the supermarket because a server at home is off is useless. */
+      if (e.notFound || e.noNutrition) throw e;
+      console.warn("Search server unavailable, going direct to Open Food Facts:", e.message);
+      food = await directProduct(code);
+    }
+  } else {
+    food = await directProduct(code);
+  }
 
   S.offCache[code] = food;
   const keys = Object.keys(S.offCache);
@@ -199,6 +268,183 @@ function normaliseFood(f) {
   if (!ports.some(p => p.g === 100)) ports.push({ label: "100 g", g: 100 });
   if (!ports.some(p => p.gram)) ports.push(GRAM_PORTION);
   return Object.assign({}, f, { source: f.source || "off", portions: ports });
+}
+
+/* ============================================================
+   SYNC
+   Diaries are per account and private to their token. The food
+   library is shared across the household on purpose.
+   ============================================================ */
+
+let syncTimer = null, syncing = false;
+let syncStatus = { state: "idle", at: 0, msg: "" };   // idle | ok | error | off
+
+function syncEnabled() { return !!(serverBase() && (activeProfile().token || "").trim()); }
+
+function authHeaders() {
+  return { "Content-Type": "application/json", Authorization: "Bearer " + activeProfile().token.trim() };
+}
+
+function scheduleSync(delay = 4000) {
+  if (!syncEnabled()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(), delay);
+}
+
+/* What this device believes, with timestamps so the server can merge rather
+   than overwrite. Note that serverUrl/usdaKey are deliberately NOT synced —
+   they're device configuration, not diary data. */
+function diaryPayload() {
+  const days = {};
+  for (const [date, meals] of Object.entries(S.diary)) {
+    days[date] = { updatedAt: S.dayStamps[date] || 0, meals };
+  }
+  const weights = {};
+  for (const [date, kg] of Object.entries(S.weights)) {
+    weights[date] = { updatedAt: S.weightStamps[date] || 0, value: kg };
+  }
+  return {
+    days, weights,
+    settings: { updatedAt: S.settingsStamp || 0, value: { goal: S.goal, macroPct: S.macroPct } }
+  };
+}
+
+function applyDiary(doc) {
+  if (!doc) return;
+  const diary = {}, stamps = {};
+  for (const [date, d] of Object.entries(doc.days || {})) {
+    if (!d || !d.meals) continue;
+    diary[date] = d.meals;
+    stamps[date] = d.updatedAt || 0;
+  }
+  S.diary = diary;
+  S.dayStamps = stamps;
+
+  const weights = {}, wstamps = {};
+  for (const [date, wv] of Object.entries(doc.weights || {})) {
+    if (!wv || wv.value == null) continue;
+    weights[date] = wv.value;
+    wstamps[date] = wv.updatedAt || 0;
+  }
+  S.weights = weights;
+  S.weightStamps = wstamps;
+
+  if (doc.settings && doc.settings.value && (doc.settings.updatedAt || 0) >= (S.settingsStamp || 0)) {
+    const v = doc.settings.value;
+    if (typeof v.goal === "number") S.goal = v.goal;
+    if (v.macroPct) S.macroPct = v.macroPct;
+    S.settingsStamp = doc.settings.updatedAt || 0;
+  }
+}
+
+function foodsPayload() {
+  const foods = {};
+  S.custom.forEach(f => { foods[f.id] = { updatedAt: S.foodStamps[f.id] || 0, food: f }; });
+  for (const [id, ts] of Object.entries(S.deletedFoods || {})) {
+    foods[id] = { updatedAt: ts, deleted: true };
+  }
+  return { foods };
+}
+
+function applyFoods(map) {
+  const list = [], stamps = {}, dels = {};
+  for (const [id, e] of Object.entries(map || {})) {
+    stamps[id] = e.updatedAt || 0;
+    if (e.deleted) dels[id] = e.updatedAt || 0;
+    else if (e.food) list.push(Object.assign({}, e.food, { id, source: "custom" }));
+  }
+  list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  S.custom = list;
+  S.foodStamps = stamps;
+  S.deletedFoods = dels;
+}
+
+async function syncPost(path, body) {
+  const res = await fetch(serverBase() + path, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body)
+  });
+  if (res.status === 401) { const e = new Error("unauthorized"); e.auth = true; throw e; }
+  if (res.status === 501) { const e = new Error("no-sync"); e.noSync = true; throw e; }
+  if (!res.ok) {
+    let detail = "";
+    try { const j = await res.json(); detail = (j.error && j.error.message) || ""; } catch (err) { /* not JSON */ }
+    const e = new Error("http " + res.status); e.status = res.status; e.detail = detail; throw e;
+  }
+  return res.json();
+}
+
+async function syncNow(manual = false) {
+  if (!syncEnabled()) {
+    if (manual) toast("Set a server and a sync token first");
+    return false;
+  }
+  if (syncing) return false;
+  syncing = true;
+  clearTimeout(syncTimer);
+  if (manual) toast("Syncing…");
+
+  try {
+    const d = await syncPost("/api/diary", diaryPayload());
+    applyDiary(d.diary);
+
+    const f = await syncPost("/api/foods", foodsPayload());
+    applyFoods(f.foods);
+
+    S.lastSync = Date.now();
+    syncStatus = { state: "ok", at: S.lastSync, msg: "" };
+    save(false);                       // don't let saving trigger another sync
+    if (curView === "today") renderToday();
+    else if (curView === "foods") renderFoods();
+    else if (curView === "trends") renderTrends();
+    if (manual) toast("Synced");
+    if (curView === "settings") renderSettings();
+    return true;
+  } catch (e) {
+    syncStatus = { state: "error", at: Date.now(), msg: syncErrorText(e) };
+    console.warn("Sync failed:", e);
+    if (manual) { toast("Sync failed"); if (curView === "settings") renderSettings(); }
+    return false;
+  } finally {
+    syncing = false;
+  }
+}
+
+function syncErrorText(e) {
+  if (e.auth) return "The server didn't recognise that sync token. Check it matches one in OFFPROXY_ACCOUNTS.";
+  if (e.noSync) return "That server is running, but sync isn't switched on (no OFFPROXY_DATA / OFFPROXY_ACCOUNTS).";
+  if (e.status) return `The server returned HTTP ${e.status}${e.detail ? " — " + e.detail : ""}.`;
+  return "Couldn't reach the server. Your entries are saved on this device and will sync when it's back.";
+}
+
+function syncSummary() {
+  if (!serverBase()) return "No server set — this device keeps its diary to itself.";
+  if (!(activeProfile().token || "").trim()) return "No sync token for this profile, so nothing is being synced.";
+  if (syncStatus.state === "error") return syncStatus.msg;
+  if (!S.lastSync) return "Not synced yet.";
+  const mins = Math.round((Date.now() - S.lastSync) / 60000);
+  if (mins < 1) return "Synced just now.";
+  if (mins < 60) return `Synced ${mins} minute${mins === 1 ? "" : "s"} ago.`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `Synced ${hrs} hour${hrs === 1 ? "" : "s"} ago.`;
+  return `Last synced ${new Date(S.lastSync).toLocaleDateString("en-GB")}.`;
+}
+
+/* ---------------- switching profile ---------------- */
+async function switchProfile(id) {
+  if (id === P.active) return;
+  if (syncEnabled()) await syncNow();     // flush this person's work before leaving
+  clearTimeout(saveTimer);
+  try { localStorage.setItem(dataKey(), JSON.stringify(S)); } catch (e) { console.error(e); }
+
+  P.active = id;
+  saveProfiles();
+  S = load();
+  syncStatus = { state: "idle", at: 0, msg: "" };
+  curDate = ymd(new Date());
+  renderWhoBar();
+  show("today");
+  toast(`Now logging as ${profileLabel()}`);
+  if (syncEnabled()) syncNow();
 }
 
 /* ---------------- text search ---------------- */
@@ -357,6 +603,40 @@ function hideToast() { $("#toast").hidden = true; }
 /* ============================================================
    VIEWS
    ============================================================ */
+/* The whose-diary strip. Only shown when there's more than one profile on
+   this device — but then it's shown on every screen, because logging your
+   lunch into your wife's diary is the one mistake that must not be easy. */
+function renderWhoBar() {
+  const many = P.list.length > 1;
+  $$(".whobar").forEach(b => {
+    b.hidden = !many;
+    if (!many) return;
+    b.innerHTML = `<span class="dot"></span><b>${esc(profileLabel())}</b><span class="swap">switch</span>`;
+    b.onclick = openProfilePicker;
+  });
+}
+
+function openProfilePicker() {
+  const body = P.list.map(p =>
+    `<button class="res" data-profile="${esc(p.id)}">
+       <div class="txt"><div class="nm">${esc(p.label)}</div>
+       <div class="sub">${p.id === P.active ? "currently logging" : (p.token ? "syncs to the server" : "this device only")}</div></div>
+       ${p.id === P.active ? '<span class="tagpill">active</span>' : ""}
+     </button>`).join("");
+  $("#addTitle").textContent = "Who's logging?";
+  $("#addSheet").hidden = false;
+  $(".searchrow").hidden = true;
+  $("#srcChips").hidden = true;
+  $("#results").innerHTML = body +
+    `<div class="hint" style="text-align:left;padding-top:14px">Add or rename people in <b>More → Who uses this device</b>.</div>`;
+  $("#results").onclick = e => {
+    const b = e.target.closest("[data-profile]");
+    if (!b) return;
+    closeSheets();
+    switchProfile(b.dataset.profile);
+  };
+}
+
 let curView = "today";
 function show(view) {
   curView = view;
@@ -436,8 +716,26 @@ function renderFoods() {
     : `<div class="hint">Foods you log will show up here for one-tap re-adding.</div>`;
 
   $("#customList").innerHTML = S.custom.length
-    ? S.custom.map(f => resRow(f, "yours")).join("")
-    : `<div class="hint">No foods of your own yet.<br>Create one for anything you eat often that has no barcode.</div>`;
+    ? S.custom.map(f => `<div class="prow">
+         ${resRow(f, syncEnabled() ? "shared" : "yours")}
+         <button class="del" data-delfood="${esc(f.id)}" aria-label="Delete ${esc(f.name)}">✕</button>
+       </div>`).join("")
+    : `<div class="hint">No foods of your own yet.<br>Create one for anything you eat often that has no barcode.${syncEnabled() ? "<br>Foods you create here are shared with everyone on your server." : ""}</div>`;
+
+  $$("[data-delfood]").forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    const id = b.dataset.delfood;
+    const f = S.custom.find(x => x.id === id);
+    if (!f) return;
+    const shared = syncEnabled();
+    if (!confirm(`Delete "${f.name}"?${shared ? "\n\nIt's a shared food, so it goes for everyone on your server." : ""}\n\nDiary entries already logged are not affected.`)) return;
+    S.custom = S.custom.filter(x => x.id !== id);
+    S.deletedFoods[id] = Date.now();   // tombstone, so another device can't resurrect it
+    delete S.foodStamps[id];
+    save();
+    renderFoods();
+    toast("Deleted");
+  });
 }
 
 function resRow(f, tag) {
@@ -553,8 +851,37 @@ function renderSettings() {
     </div>
 
     <div class="card">
+      <h3>Who uses this device</h3>
+      <p>Each person gets their own diary here. Their sync token is what tells the server whose diary it is, so one person's token can never fetch the other's. Custom foods are shared across the household on purpose.</p>
+      <div class="list">
+        ${P.list.map(p => `
+          <div class="prow${p.id === P.active ? " is-active" : ""}">
+            <div class="txt">
+              <div class="nm">${esc(p.label)}${p.id === P.active ? ` <span class="tagpill">active</span>` : ""}</div>
+              <div class="sub">${p.token ? "sync token set" : "no token — this device only"}</div>
+            </div>
+            ${p.id === P.active ? "" : `<button class="ghost small" data-switchto="${esc(p.id)}">Use</button>`}
+            <button class="ghost small" data-editprofile="${esc(p.id)}">Edit</button>
+          </div>`).join("")}
+      </div>
+      <div class="btnrow"><button class="ghost" id="addProfile">+ Add a person</button></div>
+    </div>
+
+    <div class="card">
+      <h3>Sync</h3>
+      <p>${esc(syncSummary())}</p>
+      <label class="fld"><span>Sync token for ${esc(profileLabel())}</span>
+        <input type="password" id="setToken" value="${esc(activeProfile().token || "")}" placeholder="paste the token from OFFPROXY_ACCOUNTS" autocomplete="off" spellcheck="false"></label>
+      <p>Generate one on the server with <code>offproxy -gen-token</code>, add it to <code>OFFPROXY_ACCOUNTS</code>, and paste the same value here. Without a token this profile stays on this device.</p>
+      <div class="btnrow">
+        <button class="primary" id="saveToken">Save token</button>
+        <button class="ghost" id="syncNowBtn">Sync now</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Your data</h3>
-      <p>Everything is stored only in this browser. Clearing site data or switching device loses it — export now and then.</p>
+      <p>Everything is stored only in this browser${syncEnabled() ? " and on your own server" : ""}. Clearing site data or switching device loses the local copy — export now and then.</p>
       <div class="btnrow">
         <button class="ghost" id="exportBtn">Export JSON</button>
         <button class="ghost" id="importBtn">Import JSON</button>
@@ -582,6 +909,7 @@ function renderSettings() {
     const g = clamp(+$("#setGoal").value || 2000, 500, 8000);
     S.goal = g;
     S.macroPct = { p: +$("#setP").value || 25, c: +$("#setC").value || 45, f: +$("#setF").value || 30 };
+    S.settingsStamp = Date.now();
     save(); toast("Goal saved"); renderSettings();
   };
 
@@ -621,6 +949,47 @@ function renderSettings() {
     }
   };
 
+  /* --- profiles --- */
+  $$("[data-switchto]").forEach(b => b.onclick = () => switchProfile(b.dataset.switchto));
+
+  $$("[data-editprofile]").forEach(b => b.onclick = () => {
+    const p = P.list.find(x => x.id === b.dataset.editprofile);
+    if (!p) return;
+    const name = prompt(`Name for this person (blank to remove them from this device)`, p.label);
+    if (name === null) return;
+    if (name.trim() === "") {
+      if (P.list.length === 1) { toast("You need at least one person"); return; }
+      if (!confirm(`Remove ${p.label} from this device?\n\nTheir diary here is deleted. Anything already synced stays on the server.`)) return;
+      try { localStorage.removeItem(dataKeyFor(p.id)); } catch (e) { /* nothing to do */ }
+      P.list = P.list.filter(x => x.id !== p.id);
+      if (P.active === p.id) { P.active = P.list[0].id; S = load(); }
+      saveProfiles(); renderWhoBar(); renderSettings();
+      toast("Removed");
+      return;
+    }
+    p.label = name.trim();
+    saveProfiles(); renderWhoBar(); renderSettings();
+  });
+
+  $("#addProfile").onclick = () => {
+    const name = prompt("Name for the new person");
+    if (!name || !name.trim()) return;
+    const id = "p_" + uid();
+    P.list.push({ id, label: name.trim(), token: "" });
+    saveProfiles();
+    renderWhoBar(); renderSettings();
+    toast(`Added ${name.trim()} — switch to them to set their sync token`);
+  };
+
+  /* --- sync --- */
+  $("#saveToken").onclick = () => {
+    activeProfile().token = $("#setToken").value.trim();
+    saveProfiles();
+    renderSettings();
+    if (syncEnabled()) syncNow(true); else toast("Token cleared");
+  };
+  $("#syncNowBtn").onclick = () => syncNow(true);
+
   $("#exportBtn").onclick = () => {
     const blob = new Blob([JSON.stringify(S, null, 2)], { type: "application/json" });
     const a = el("a"); a.href = URL.createObjectURL(blob);
@@ -635,13 +1004,24 @@ function renderSettings() {
       const data = JSON.parse(await f.text());
       if (!data || typeof data !== "object" || !("diary" in data)) throw new Error("Not a Tally backup");
       S = Object.assign(structuredClone(DEFAULTS), data);
+      const now = Date.now();
+      Object.keys(S.diary || {}).forEach(d => { S.dayStamps[d] = now; });
+      Object.keys(S.weights || {}).forEach(d => { S.weightStamps[d] = now; });
+      (S.custom || []).forEach(f => { S.foodStamps[f.id] = now; });
+      S.settingsStamp = now;
       save(); toast("Backup restored"); show("today");
     } catch (err) { toast("Couldn't read that file"); console.error(err); }
     e.target.value = "";
   };
   $("#wipeBtn").onclick = () => {
-    if (!confirm("Erase all diary entries, foods and settings on this device?")) return;
-    localStorage.removeItem(KEY); S = structuredClone(DEFAULTS); save(); show("today"); toast("Everything erased");
+    const who = P.list.length > 1 ? `${profileLabel()}'s ` : "";
+    if (!confirm(`Erase ${who}diary entries, foods and settings on this device?` +
+      (syncEnabled() ? "\n\nAnything already synced stays on the server and will come back on the next sync." : ""))) return;
+    try { localStorage.removeItem(dataKey()); } catch (e) { /* nothing to do */ }
+    S = structuredClone(DEFAULTS);
+    save(false);
+    show("today");
+    toast("Erased on this device");
   };
 }
 
@@ -654,6 +1034,10 @@ let searchAbort = null;
 
 function openAdd(meal) {
   hideToast();
+  /* the profile picker borrows this sheet — put it back how it was */
+  $(".searchrow").hidden = false;
+  $("#srcChips").hidden = false;
+  $("#results").onclick = null;
   addMeal = meal || guessMeal();
   srcFilter = "all";
   $$("#srcChips .chip").forEach(c => c.classList.toggle("is-on", c.dataset.src === "all"));
@@ -960,7 +1344,7 @@ function commitPortion() {
     const day = dayData(curDate);
     for (const m of MEALS) {
       const i = day[m].findIndex(e => e.id === pEditing.id);
-      if (i >= 0) { day[m].splice(i, 1); break; }
+      if (i >= 0) { day[m].splice(i, 1); touchDay(curDate); break; }
     }
     logEntry(entry, addMeal, true, "Updated");
   } else {
@@ -972,6 +1356,7 @@ function commitPortion() {
 function logEntry(entry, meal, remember = true, verb = "Added") {
   const day = dayData(curDate);
   day[meal].push(entry);
+  touchDay(curDate);
 
   if (remember && pFood) {
     const k = foodKey(pFood);
@@ -985,7 +1370,7 @@ function logEntry(entry, meal, remember = true, verb = "Added") {
     const d = dayData(curDate);
     const i = d[meal].findIndex(e => e.id === entry.id);
     if (i >= 0) d[meal].splice(i, 1);
-    save(); renderToday();
+    touchDay(curDate); save(); renderToday();
   });
 }
 
@@ -1162,8 +1547,10 @@ function newCustomFood(code, prefillName) {
     source: "custom", cat: "Your food", per100: { k, p, c, f }, portions
   };
   S.custom.unshift(food);
+  S.foodStamps[food.id] = Date.now();
+  delete S.deletedFoods[food.id];
   save();
-  toast("Food created");
+  toast(syncEnabled() ? "Food created — shared with the household" : "Food created");
   openPortion(food);
 }
 
@@ -1194,9 +1581,9 @@ function bind() {
       const [meal, i] = del.dataset.del.split("|");
       const day = dayData(curDate);
       const [removed] = day[meal].splice(+i, 1);
-      save(); renderToday();
+      touchDay(curDate); save(); renderToday();
       toast(`Removed ${removed.name}`, "Undo", () => {
-        dayData(curDate)[meal].splice(+i, 0, removed); save(); renderToday();
+        dayData(curDate)[meal].splice(+i, 0, removed); touchDay(curDate); save(); renderToday();
       });
       return;
     }
@@ -1249,7 +1636,9 @@ function bind() {
   $("#weightSave").onclick = () => {
     const v = parseFloat($("#weightInput").value);
     if (!Number.isFinite(v) || v <= 0) { toast("Enter a weight"); return; }
-    S.weights[ymd(new Date())] = r1(v); save(); renderTrends(); toast("Weight logged");
+    const today = ymd(new Date());
+    S.weights[today] = r1(v); S.weightStamps[today] = Date.now();
+    save(); renderTrends(); toast("Weight logged");
   };
 
   /* scanner */
@@ -1273,13 +1662,16 @@ function bind() {
     if (document.visibilityState !== "visible") return;
     const today = ymd(new Date());
     if (curDate !== today && curView === "today") { curDate = today; renderToday(); }
+    if (syncEnabled()) scheduleSync(500);   // pick up whatever the other device did
   });
 }
 
 /* ---------------- start ---------------- */
 function init() {
   bind();
+  renderWhoBar();
   show("today");
+  if (syncEnabled()) syncNow();
 
   /* home-screen shortcut: open straight into the scanner */
   if (new URLSearchParams(location.search).get("action") === "scan") {

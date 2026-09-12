@@ -53,6 +53,33 @@ small{font-size:.72rem}
 }
 .iconbtn:active{background:var(--surface-2)}
 
+/* ---------- whose diary ---------- */
+/* Deliberately loud. On a shared iPad, logging into the wrong diary is the
+   one mistake that must never be easy to make by accident. */
+.whobar{
+  display:flex; align-items:center; gap:8px;
+  width:100%; padding:8px 14px; flex:none;
+  background:var(--accent-soft); color:var(--accent);
+  font-size:.82rem; font-weight:600; text-align:left;
+  border-bottom:1px solid var(--line);
+}
+.whobar[hidden]{display:none}
+.whobar .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.whobar b{flex:1; font-weight:700}
+.whobar .swap{font-weight:500; opacity:.75; text-decoration:underline}
+.whobar:active{filter:brightness(.96)}
+
+.prow{display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--line)}
+.prow:last-child{border-bottom:0}
+.prow > .res{border-bottom:0; flex:1; min-width:0}
+.prow > .txt{flex:1; min-width:0; padding:11px 2px}
+.prow .nm{font-size:.94rem}
+.prow .sub{font-size:.78rem; color:var(--ink-3)}
+.prow.is-active .nm{font-weight:650}
+.prow .del{width:36px;height:36px;border-radius:50%;color:var(--ink-3);font-size:1rem;display:grid;place-items:center;flex:none}
+.prow .del:active{background:var(--surface-2); color:var(--danger)}
+button.small{padding:7px 11px; font-size:.8rem; flex:none}
+
 .scroll{flex:1; overflow-y:auto; -webkit-overflow-scrolling:touch}
 .pad{padding:14px}
 .spacer{height:28px}

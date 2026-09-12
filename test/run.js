@@ -211,7 +211,7 @@ function ok(name, cond, extra) {
 
   console.log("\n— barcode cached for offline reuse —");
   ok("product cached in local storage",
-     await page.evaluate(() => !!JSON.parse(localStorage.getItem("tally.v1")).offCache["5000157024671"]));
+     await page.evaluate(() => !!JSON.parse(localStorage.getItem(dataKey())).offCache["5000157024671"]));
 
   console.log("\n— unknown barcode is handled —");
   await page.route("**/world.openfoodfacts.org/api/v2/product/9999999999999**", route => route.fulfill({
@@ -335,6 +335,47 @@ function ok(name, cond, extra) {
      await page.locator("#portionBody .pkcal b").textContent());
   await page.keyboard.press("Escape");
 
+  console.log("\n— barcode still works when the server is unreachable —");
+  await page.evaluate(() => { S.offCache = {}; save(); });
+  await page.unroute(PROXY + "/api/product/**");
+  await page.route(PROXY + "/api/product/**", r => r.abort("failed"));   // server down
+  await page.unroute("**/world.openfoodfacts.org/**");
+  await page.route("**/world.openfoodfacts.org/**", route => route.fulfill({
+    status: 200, contentType: "application/json",
+    body: JSON.stringify({ code: "5000157024671", status: 1, product: {
+      code: "5000157024671", product_name: "Beanz in a rich tomato sauce", brands: "Heinz",
+      product_quantity: 415, serving_size: "0.5 Can (207 g)", serving_quantity: 207,
+      nutriments: { "energy-kcal_100g": 79, proteins_100g: 4.7, carbohydrates_100g: 12.9, fat_100g: 0.2 } } })
+  }));
+  await page.click('[data-addmeal="Dinner"]');
+  await page.fill("#searchInput", "5000157024671");
+  await page.waitForTimeout(400);
+  await page.click("[data-barcode]");
+  await page.waitForSelector("#portionBody .pkcal", { timeout: 6000 });
+  ok("falls back to Open Food Facts directly",
+     (await page.locator("#portionName").textContent()).includes("Beanz"));
+  await page.keyboard.press("Escape");
+
+  // but a genuine "not in the database" answer must NOT be retried directly
+  await page.evaluate(() => { S.offCache = {}; save(); });
+  let directCalls = 0;
+  await page.unroute("**/world.openfoodfacts.org/**");
+  await page.route("**/world.openfoodfacts.org/**", route => {
+    directCalls++;
+    route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify({ code: "7777777777777", status: 0 }) });
+  });
+  await page.unroute(PROXY + "/api/product/**");
+  await page.route(PROXY + "/api/product/**", r => r.fulfill({ status: 404,
+    contentType: "application/json", body: JSON.stringify({ error: { code: "NOT_FOUND" } }) }));
+  page.once("dialog", d => d.dismiss());
+  await page.click('[data-addmeal="Snacks"]');
+  await page.fill("#searchInput", "7777777777777");
+  await page.waitForTimeout(400);
+  await page.click("[data-barcode]");
+  await page.waitForTimeout(800);
+  ok("a definite 'not found' is not pointlessly retried", directCalls === 0, `direct calls: ${directCalls}`);
+
   console.log("\n— server failures are named, not generic —");
   await page.unroute(PROXY + "/api/search**");
   await page.route(PROXY + "/api/search**", r => r.fulfill({ status: 503, contentType: "application/json",
@@ -371,6 +412,177 @@ function ok(name, cond, extra) {
   ok("USDA label returns once the server is cleared",
      /Reference foods \(USDA\)/.test(await page.locator("#results").textContent()));
   await page.keyboard.press("Escape");
+
+  console.log("\n— profiles: migration from the single-diary version —");
+  {
+    const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p2 = await ctx2.newPage();
+    // seed the OLD storage key, as an existing v1.0 install would have
+    await p2.goto(URL, { waitUntil: "domcontentloaded" });
+    await p2.evaluate(() => {
+      localStorage.clear();
+      localStorage.setItem("tally.v1", JSON.stringify({
+        goal: 1750,
+        diary: { "2026-09-11": { Breakfast: [{ id: "old1", name: "Legacy porridge", source: "quick", grams: 100, portionLabel: "", per100: { k: 300, p: 10, c: 50, f: 5 } }], Lunch: [], Dinner: [], Snacks: [] } }
+      }));
+    });
+    await p2.reload({ waitUntil: "networkidle" });
+    await p2.waitForTimeout(400);
+    ok("old diary survives the upgrade", (await p2.locator("#sumFood").textContent()) === "300",
+       await p2.locator("#sumFood").textContent());
+    ok("old goal survives the upgrade", (await p2.locator("#sumGoal").textContent()) === "1750");
+    ok("original key left intact as a safety net",
+       await p2.evaluate(() => !!localStorage.getItem("tally.v1")));
+    ok("data now lives under a profile key",
+       await p2.evaluate(() => !!localStorage.getItem("tally.v1.me")));
+    ok("no profile bar with only one person", await p2.locator(".whobar").first().isHidden());
+    await ctx2.close();
+  }
+
+  console.log("\n— profiles: two people on one device stay separate —");
+  {
+    const ctx3 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p3 = await ctx3.newPage();
+    p3.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+    await p3.goto(URL, { waitUntil: "networkidle" });
+
+    // Mark logs something
+    await p3.click('[data-addmeal="Breakfast"]');
+    await p3.fill("#searchInput", "banana");
+    await p3.waitForTimeout(450);
+    await p3.locator("#results .res").first().click();
+    await p3.waitForSelector("#portionBody .pkcal");
+    await p3.click("#pAdd");
+    await p3.waitForTimeout(250);
+    const markTotal = await p3.locator("#sumFood").textContent();
+    ok("first person has entries", +markTotal > 0, markTotal);
+
+    // add a second person
+    await p3.click('.tab[data-view="settings"]');
+    p3.once("dialog", d => d.accept("Claire"));
+    await p3.click("#addProfile");
+    await p3.waitForTimeout(300);
+    ok("profile bar appears once there are two", await p3.locator("#view-settings .whobar").isVisible());
+
+    await p3.locator("[data-switchto]").first().click();
+    await p3.waitForTimeout(400);
+    ok("switching lands on Today", await p3.locator("#view-today").isVisible());
+    ok("the new person's diary is empty", (await p3.locator("#sumFood").textContent()) === "0",
+       await p3.locator("#sumFood").textContent());
+    ok("the bar names who is logging", /Claire/.test(await p3.locator("#view-today .whobar").textContent()));
+
+    // switch back via the bar
+    await p3.click("#view-today .whobar");
+    await p3.waitForTimeout(300);
+    await p3.locator("[data-profile]").first().click();
+    await p3.waitForTimeout(400);
+    ok("switching back restores the first diary", (await p3.locator("#sumFood").textContent()) === markTotal,
+       await p3.locator("#sumFood").textContent());
+    ok("search sheet still works after the profile picker borrowed it", await (async () => {
+      await p3.click('[data-addmeal="Lunch"]');
+      const visible = await p3.locator(".searchrow").isVisible() && await p3.locator("#srcChips").isVisible();
+      await p3.keyboard.press("Escape");
+      return visible;
+    })());
+    await ctx3.close();
+  }
+
+  console.log("\n— sync round-trip against a stub server —");
+  {
+    const ctx4 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p4 = await ctx4.newPage();
+    p4.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+
+    // a tiny in-memory stand-in for offproxy that merges the way the real one does
+    let serverDiary = { days: {}, weights: {} };
+    let serverFoods = {};
+    let seenTokens = [];
+    await p4.route(PROXY + "/api/diary", async route => {
+      const req = route.request();
+      seenTokens.push(req.headers()["authorization"] || "");
+      const body = JSON.parse(req.postData() || "{}");
+      for (const [d, v] of Object.entries(body.days || {})) {
+        if (!serverDiary.days[d] || v.updatedAt > serverDiary.days[d].updatedAt) serverDiary.days[d] = v;
+      }
+      if (body.settings && (!serverDiary.settings || body.settings.updatedAt > serverDiary.settings.updatedAt)) {
+        serverDiary.settings = body.settings;
+      }
+      route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ account: "mark", diary: serverDiary }) });
+    });
+    await p4.route(PROXY + "/api/foods", async route => {
+      const body = JSON.parse(route.request().postData() || "{}");
+      for (const [id, v] of Object.entries(body.foods || {})) {
+        if (!serverFoods[id] || v.updatedAt > serverFoods[id].updatedAt) serverFoods[id] = v;
+      }
+      route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ foods: serverFoods }) });
+    });
+
+    await p4.goto(URL, { waitUntil: "networkidle" });
+    await p4.click('.tab[data-view="settings"]');
+    await p4.fill("#setServer", PROXY);
+    await p4.click("#saveUsda");
+    await p4.waitForTimeout(200);
+    await p4.fill("#setToken", "mark-token-0123456789abcdef");
+    await p4.click("#saveToken");
+    await p4.waitForTimeout(700);
+
+    ok("a token is sent as a bearer header", seenTokens.some(t => t.startsWith("Bearer mark-token")),
+       JSON.stringify(seenTokens.slice(0, 2)));
+
+    await p4.click('.tab[data-view="today"]');
+    await p4.click('[data-addmeal="Breakfast"]');
+    await p4.click('#srcChips .chip[data-src="quick"]');
+    await p4.fill("#qaK", "420");
+    await p4.click("#qaAdd");
+    await p4.waitForTimeout(300);
+    await p4.click('.tab[data-view="settings"]');
+    await p4.click("#syncNowBtn");
+    await p4.waitForTimeout(800);
+    ok("the entry reached the server", JSON.stringify(serverDiary).includes("420"),
+       JSON.stringify(serverDiary).slice(0, 160));
+    ok("settings status reports a successful sync", /Synced/.test(await p4.locator("#view-settings").textContent()));
+
+    // a second device pulls it down
+    const ctx5 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p5 = await ctx5.newPage();
+    await p5.route(PROXY + "/api/diary", route => route.fulfill({ status: 200,
+      contentType: "application/json", body: JSON.stringify({ account: "mark", diary: serverDiary }) }));
+    await p5.route(PROXY + "/api/foods", route => route.fulfill({ status: 200,
+      contentType: "application/json", body: JSON.stringify({ foods: serverFoods }) }));
+    await p5.goto(URL, { waitUntil: "networkidle" });
+    await p5.click('.tab[data-view="settings"]');
+    await p5.fill("#setServer", PROXY);
+    await p5.click("#saveUsda");
+    await p5.waitForTimeout(200);
+    await p5.fill("#setToken", "mark-token-0123456789abcdef");
+    await p5.click("#saveToken");
+    await p5.waitForTimeout(900);
+    await p5.click('.tab[data-view="today"]');
+    ok("a second device receives the diary", (await p5.locator("#sumFood").textContent()) === "420",
+       await p5.locator("#sumFood").textContent());
+    await ctx5.close();
+
+    console.log("\n— sync failures are reported, not silent —");
+    await p4.unroute(PROXY + "/api/diary");
+    await p4.route(PROXY + "/api/diary", r => r.fulfill({ status: 401, contentType: "application/json",
+      body: JSON.stringify({ error: { code: "UNAUTHORIZED", message: "missing or unrecognised token" } }) }));
+    await p4.click("#syncNowBtn");
+    await p4.waitForTimeout(700);
+    ok("a rejected token says so", /didn't recognise that sync token/.test(await p4.locator("#view-settings").textContent()));
+
+    await p4.unroute(PROXY + "/api/diary");
+    await p4.route(PROXY + "/api/diary", r => r.abort("failed"));
+    await p4.click("#syncNowBtn");
+    await p4.waitForTimeout(700);
+    const offlineTxt = await p4.locator("#view-settings").textContent();
+    ok("an offline server reassures rather than alarms", /saved on this device/.test(offlineTxt), offlineTxt.slice(0, 160));
+    await p4.click('.tab[data-view="today"]');
+    ok("entries survive a failed sync", (await p4.locator("#sumFood").textContent()) === "420");
+
+    await ctx4.close();
+  }
 
   console.log("\n— export —");
   const dl = page.waitForEvent("download", { timeout: 5000 }).catch(() => null);

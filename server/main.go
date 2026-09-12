@@ -43,6 +43,8 @@ type config struct {
 	searchTTL       time.Duration
 	productTTL      time.Duration
 	maxResults      int
+	dataDir         string
+	accounts        []account
 }
 
 func loadConfig() (config, error) {
@@ -70,6 +72,30 @@ func loadConfig() (config, error) {
 	}
 	if len(c.origins) == 0 {
 		return c, errors.New("OFFPROXY_ORIGINS is required, e.g. \"https://you.github.io\" (or \"*\")")
+	}
+
+	// Sync is optional: without a data directory offproxy stays the stateless
+	// search service it was.
+	c.dataDir = os.Getenv("OFFPROXY_DATA")
+	accts, err := parseAccounts(os.Getenv("OFFPROXY_ACCOUNTS"))
+	if err != nil {
+		return c, err
+	}
+	c.accounts = accts
+	if c.dataDir != "" && len(c.accounts) == 0 {
+		return c, errors.New("OFFPROXY_DATA is set but OFFPROXY_ACCOUNTS is empty; sync would have no users")
+	}
+	if len(c.accounts) > 0 && c.dataDir == "" {
+		return c, errors.New("OFFPROXY_ACCOUNTS is set but OFFPROXY_DATA is empty; there is nowhere to store diaries")
+	}
+	// Wildcard CORS plus bearer tokens would let any site on the internet use a
+	// token it managed to obtain. Refuse the combination rather than ship it.
+	if len(c.accounts) > 0 {
+		for _, o := range c.origins {
+			if o == "*" {
+				return c, errors.New("OFFPROXY_ORIGINS=\"*\" is not allowed once accounts are configured; list your app's origin explicitly")
+			}
+		}
 	}
 	return c, nil
 }
@@ -423,9 +449,14 @@ type server struct {
 	pCache *cache
 	sLimit *limiter
 	pLimit *limiter
+	store  *store
 }
 
 func newServer(cfg config) *server {
+	st, err := newStore(cfg.dataDir)
+	if err != nil {
+		log.Fatalf("data directory: %v", err)
+	}
 	return &server{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 12 * time.Second},
@@ -433,6 +464,7 @@ func newServer(cfg config) *server {
 		pCache: newCache(20000),
 		sLimit: newLimiter(10),
 		pLimit: newLimiter(15),
+		store:  st,
 	}
 }
 
@@ -466,8 +498,8 @@ func (s *server) cors(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
@@ -651,32 +683,50 @@ func isDigits(s string) bool {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	wrap := func(h http.HandlerFunc) http.HandlerFunc {
+	wrap := func(methods string, h http.HandlerFunc) http.HandlerFunc {
+		allowed := strings.Split(methods, ",")
 		return func(w http.ResponseWriter, r *http.Request) {
 			s.cors(w, r)
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
-			if r.Method != http.MethodGet {
-				writeErr(w, http.StatusMethodNotAllowed, "METHOD", "GET only")
-				return
+			for _, m := range allowed {
+				if r.Method == m {
+					h(w, r)
+					return
+				}
 			}
-			h(w, r)
+			writeErr(w, http.StatusMethodNotAllowed, "METHOD", methods+" only")
 		}
 	}
 
-	mux.HandleFunc("/api/search", wrap(s.handleSearch))
-	mux.HandleFunc("/api/product/", wrap(s.handleProduct))
-	mux.HandleFunc("/health", wrap(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/search", wrap("GET", s.handleSearch))
+	mux.HandleFunc("/api/product/", wrap("GET", s.handleProduct))
+
+	// sync — present only when OFFPROXY_DATA and OFFPROXY_ACCOUNTS are set
+	mux.HandleFunc("/api/whoami", wrap("GET", s.handleWhoami))
+	mux.HandleFunc("/api/diary", wrap("GET,POST", s.handleDiary))
+	mux.HandleFunc("/api/foods", wrap("GET,POST", s.handleFoods))
+
+	mux.HandleFunc("/health", wrap("GET", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "service": "offproxy", "userAgent": s.cfg.userAgent,
+			"sync": s.store != nil && len(s.cfg.accounts) > 0,
 		})
 	}))
 	return mux
 }
 
 func main() {
+	// Convenience so nobody invents a weak token by hand.
+	for _, a := range os.Args[1:] {
+		if a == "-gen-token" || a == "--gen-token" {
+			fmt.Println(generateToken())
+			return
+		}
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -692,6 +742,15 @@ func main() {
 
 	go func() {
 		log.Printf("offproxy listening on %s as %q", cfg.addr, cfg.userAgent)
+		if len(cfg.accounts) > 0 {
+			ids := make([]string, 0, len(cfg.accounts))
+			for _, a := range cfg.accounts {
+				ids = append(ids, a.ID)
+			}
+			log.Printf("sync enabled for %s, data in %s", strings.Join(ids, ", "), cfg.dataDir)
+		} else {
+			log.Printf("sync disabled (set OFFPROXY_DATA and OFFPROXY_ACCOUNTS to enable)")
+		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

@@ -1,0 +1,12 @@
+# Built binary — don't commit a 6 MB artefact to a Pages repo
+server/offproxy
+server/*.test
+
+# Anywhere you might keep real secrets locally.
+# Tokens belong in the systemd unit ON THE SERVER, never in this repo —
+# it's public, which is what GitHub Pages requires on the free plan.
+*.env
+.env*
+server/offproxy.local.service
+secrets*
+*token*.txt
