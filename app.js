@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.3.1";
+const VERSION = "1.4.0";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -92,6 +92,7 @@ const DEFAULTS = {
   recent: [],       // recently logged foods (newest first)
   counts: {},       // foodKey -> times logged
   weights: {},      // "YYYY-MM-DD" -> kg
+  activity: {},     // "YYYY-MM-DD" -> kcal of active energy, from a watch via the server
   offCache: {},     // barcode -> food
   seenIntro: false,
   /* sync bookkeeping: what changed when, so a merge can pick a winner */
@@ -328,6 +329,13 @@ function applyDiary(doc) {
   }
   S.weights = weights;
   S.weightStamps = wstamps;
+
+  /* Read-only here: the watch feed is written by /api/activity, never by us. */
+  const act = {};
+  for (const [date, av] of Object.entries(doc.activity || {})) {
+    if (av && av.value != null) act[date] = av.value;
+  }
+  S.activity = act;
 
   if (doc.settings && doc.settings.value && (doc.settings.updatedAt || 0) >= (S.settingsStamp || 0)) {
     const v = doc.settings.value;
@@ -753,6 +761,19 @@ function renderToday() {
         }).join("") : `<div class="empty">Nothing logged yet</div>`}
       </div>`;
   }).join("");
+
+  /* Model A: active energy is shown, never spent. The goal already came from
+     a TDEE estimate with an activity multiplier, so adding a measured burn on
+     top would count the same exercise twice. See More -> Daily goal. */
+  const active = S.activity ? S.activity[curDate] : null;
+  const actEl = $("#activeLine");
+  if (active != null && active > 0) {
+    actEl.hidden = false;
+    actEl.innerHTML = `<span class="dot"></span>${r0(active)} kcal active` +
+      `<small>not added to your goal</small>`;
+  } else {
+    actEl.hidden = true;
+  }
 
   const note = $("#dayNote");
   if (t.k === 0) note.textContent = "Tap the ❙❙❙ button to scan a barcode, or + on a meal to search.";

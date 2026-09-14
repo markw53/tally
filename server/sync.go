@@ -16,11 +16,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 /* ---------------------------------------------------------------- accounts */
@@ -178,8 +181,12 @@ type stampedVal struct {
 }
 
 type diaryDoc struct {
-	Days     map[string]stampedDay `json:"days"`
-	Weights  map[string]stampedVal `json:"weights"`
+	Days    map[string]stampedDay `json:"days"`
+	Weights map[string]stampedVal `json:"weights"`
+	// Active energy from a watch, keyed by local date. Written only by
+	// /api/activity — never by a syncing client — so a phone that knows
+	// nothing about it cannot wipe what the Shortcut posted.
+	Activity map[string]stampedVal `json:"activity,omitempty"`
 	Settings *stampedVal           `json:"settings,omitempty"`
 }
 
@@ -217,6 +224,8 @@ func mergeDiary(stored, incoming diaryDoc) diaryDoc {
 	if incoming.Settings != nil && (stored.Settings == nil || incoming.Settings.UpdatedAt > stored.Settings.UpdatedAt) {
 		stored.Settings = incoming.Settings
 	}
+	// Activity is deliberately not merged from the client: the watch feed is
+	// the only writer, and stored.Activity is left exactly as it was.
 	return stored
 }
 
@@ -335,6 +344,79 @@ func (s *server) handleFoods(w http.ResponseWriter, r *http.Request) {
 		doc.Foods = map[string]sharedFood{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"foods": doc.Foods})
+}
+
+/* ------------------------------------------------- active energy from a watch */
+
+var dateRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// handleActivity takes one day's active-energy total, posted by an iOS
+// Shortcut reading Apple Health.
+//
+//	POST /api/activity   {"date":"2026-09-13","kcal":540}
+//
+// Deliberately forgiving, because building JSON in Shortcuts is fiddly:
+// kcal may arrive as a number or a string, and date may be omitted (the
+// server then uses its own UTC date — which is why the Shortcut should send
+// one, since the phone knows the user's real day boundary and the server
+// does not).
+func (s *server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSync(w) {
+		return
+	}
+	acct, ok := s.authenticate(r)
+	if !ok {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="tally"`)
+		writeErr(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or unrecognised token")
+		return
+	}
+
+	var in struct {
+		Date string `json:"date"`
+		Kcal any    `json:"kcal"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_BODY", "expected {\"date\":\"YYYY-MM-DD\",\"kcal\":123}")
+		return
+	}
+
+	date := strings.TrimSpace(in.Date)
+	if date == "" {
+		date = time.Now().UTC().Format("2006-01-02")
+	}
+	if !dateRe.MatchString(date) {
+		writeErr(w, http.StatusBadRequest, "BAD_DATE", "date must be YYYY-MM-DD")
+		return
+	}
+
+	kcal, ok := numOf(in.Kcal)
+	if !ok || kcal < 0 || kcal > 20000 {
+		writeErr(w, http.StatusBadRequest, "BAD_KCAL", "kcal must be a number between 0 and 20000")
+		return
+	}
+	kcal = math.Round(kcal)
+
+	p := s.store.path("accounts", acct+".json")
+
+	s.store.mu.Lock()
+	defer s.store.mu.Unlock()
+
+	var doc diaryDoc
+	if err := s.store.read(p, &doc); err != nil {
+		writeErr(w, http.StatusInternalServerError, "READ_FAILED", "could not read the stored diary")
+		return
+	}
+	if doc.Activity == nil {
+		doc.Activity = map[string]stampedVal{}
+	}
+	raw, _ := json.Marshal(kcal)
+	doc.Activity[date] = stampedVal{UpdatedAt: time.Now().UnixMilli(), Value: raw}
+
+	if err := s.store.write(p, doc); err != nil {
+		writeErr(w, http.StatusInternalServerError, "WRITE_FAILED", "could not save")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": acct, "date": date, "kcal": kcal})
 }
 
 // handleWhoami lets a freshly-configured device confirm its token works and

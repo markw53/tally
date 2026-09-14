@@ -104,6 +104,17 @@ button.small{padding:7px 11px; font-size:.8rem; flex:none}
 .sumline .op{min-width:0; color:var(--ink-3)}
 
 .macros{display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:18px 4px 0}
+
+/* Active energy from a watch. Styled as information, not as budget — it is
+   deliberately not part of the calories-remaining sum. */
+.activeline{
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  margin:16px 4px 0; padding:8px 12px; border-radius:var(--r-sm);
+  background:var(--surface-2); color:var(--ink-2); font-size:.84rem; font-weight:550;
+}
+.activeline[hidden]{display:none}
+.activeline .dot{width:7px;height:7px;border-radius:50%;background:var(--p);flex:none}
+.activeline small{color:var(--ink-3); font-weight:400}
 .macro{text-align:left}
 .macro .mtop{display:flex; justify-content:space-between; font-size:.78rem; color:var(--ink-2); margin-bottom:5px}
 .macro .mtop b{color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums}

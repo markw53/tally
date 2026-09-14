@@ -652,6 +652,71 @@ function ok(name, cond, extra) {
     await ctx4.close();
   }
 
+  console.log("\n— active energy: shown, never spent (Model A) —");
+  {
+    const ctx6 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p6 = await ctx6.newPage();
+    p6.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+
+    await p6.route(PROXY + "/api/diary", route => route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({ account: "mark", diary: {
+        days: {}, weights: {},
+        activity: { [iso]: { updatedAt: Date.now(), value: 540 } }
+      }})
+    }));
+    await p6.route(PROXY + "/api/foods", route => route.fulfill({
+      status: 200, contentType: "application/json", body: JSON.stringify({ foods: {} })
+    }));
+
+    await p6.goto(URL, { waitUntil: "networkidle" });
+    await p6.click('.tab[data-view="settings"]');
+    await p6.fill("#setServer", PROXY);
+    await p6.click("#saveUsda");
+    await p6.waitForTimeout(200);
+    await p6.fill("#setToken", "mark-token-0123456789abcdef");
+    await p6.click("#saveToken");
+    await p6.waitForTimeout(900);
+    await p6.click('.tab[data-view="today"]');
+    await p6.waitForTimeout(300);
+
+    ok("active energy is displayed", await p6.locator("#activeLine").isVisible());
+    const line = await p6.locator("#activeLine").textContent();
+    ok("it shows the figure", /540/.test(line), line);
+    ok("and says it isn't being spent", /not added to your goal/i.test(line), line);
+
+    // the whole point of Model A
+    const goal = await p6.locator("#sumGoal").textContent();
+    const left = await p6.locator("#sumLeft").textContent();
+    const food = await p6.locator("#sumFood").textContent();
+    ok("goal is untouched by the 540 kcal", goal === "2000", goal);
+    ok("remaining = goal - food, with no exercise credit",
+       Number(left) === Number(goal) - Number(food), `${goal} - ${food} = ${left}`);
+
+    // log something and confirm it still doesn't leak in
+    await p6.click('[data-addmeal="Lunch"]');
+    await p6.click('#srcChips .chip[data-src="quick"]');
+    await p6.fill("#qaK", "600");
+    await p6.click("#qaAdd");
+    await p6.waitForTimeout(300);
+    ok("still no exercise credit after logging food",
+       (await p6.locator("#sumLeft").textContent()) === "1400",
+       await p6.locator("#sumLeft").textContent());
+    ok("the ring reflects food only, not food minus exercise",
+       (await p6.locator("#kcalLeft").textContent()) === "1400",
+       await p6.locator("#kcalLeft").textContent());
+
+    // a day with no watch data hides the line rather than showing a zero
+    await p6.click("#dayPrev");
+    await p6.waitForTimeout(250);
+    ok("hidden on days with no activity", await p6.locator("#activeLine").isHidden());
+
+    await ctx6.close();
+  }
+
   console.log("\n— export —");
   const dl = page.waitForEvent("download", { timeout: 5000 }).catch(() => null);
   await page.click('.tab[data-view="settings"]');

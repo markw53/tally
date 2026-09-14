@@ -102,6 +102,76 @@ day outright and the other device's changes to it are lost. In practice you're
 rarely logging the same day on two devices at once, and finer-grained merging
 would cost a lot of complexity for a rare case.
 
+## Active energy from a watch (optional)
+
+Garmin's own API is enterprise-only, so the route in is Apple Health, which
+Garmin Connect already writes to. An iOS Shortcut reads the day's active
+energy and posts it here. No API approval, no scraping, no credentials.
+
+```
+POST /api/activity   Authorization: Bearer <token>
+{"date":"2026-09-13","kcal":540}
+```
+
+The endpoint is deliberately forgiving, because building JSON in Shortcuts is
+fiddly: `kcal` may be a number or a string, and `date` may be omitted. **Send
+the date anyway** — the phone knows your real day boundary and the server,
+running on UTC, does not.
+
+Activity is written *only* here. A syncing phone never touches it, so a device
+that knows nothing about your watch cannot blank out the figure. There's a
+test for exactly that.
+
+### Building the Shortcut
+
+In the Shortcuts app, new shortcut, these actions in order:
+
+1. **Find Health Samples** — Type: `Active Energy`, and add a filter
+   `Start Date` **is today**.
+2. **Calculate Statistics** — `Sum` of `Value` from the health samples.
+3. **Format Date** — Date: `Current Date`, Format: Custom, `yyyy-MM-dd`.
+4. **Text** — with the two results above substituted in:
+   `{"date":"<Formatted Date>","kcal":<Statistic>}`
+5. **Get Contents of URL** —
+   URL `https://<your-host>/api/activity`, Method `POST`,
+   Headers `Authorization: Bearer <your token>` and
+   `Content-Type: application/json`, Request Body **File**, and pass the Text
+   from step 4.
+
+Use a plain **Text** action for the body rather than Shortcuts' JSON builder —
+the builder is prone to turning numbers into odd types, and a flat string is
+easier to eyeball when something goes wrong.
+
+Run it once by hand. iOS will ask for Health permission the first time, and
+nothing works until you grant it.
+
+### Making it automatic
+
+Automations tab → **Personal Automation** → **Time of Day** → 23:50, Daily →
+**Run Immediately**, and turn off *Notify When Run*. Late evening captures
+essentially the whole day; a second automation at midday gives you a running
+figure if you'd rather see it build.
+
+Check it end to end before trusting the automation:
+
+```bash
+curl -sS -X POST https://<your-host>/api/activity \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"date":"2026-09-13","kcal":540}'
+```
+
+### Why it isn't added to your calorie goal
+
+Tally shows the figure under the ring and leaves the arithmetic alone. The
+goal comes from a Mifflin–St Jeor estimate **with an activity multiplier**,
+which already accounts for a typical week's exercise; adding a measured burn
+on top counts the same exercise twice. That double-count is why calorie apps
+that do it feel generous.
+
+If you want the opposite model — exercise genuinely added back — set the
+activity level to *Sedentary* first so the baseline assumes nothing. The two
+approaches are each coherent; mixing them is not.
+
 ## Endpoints
 
 ```
@@ -115,6 +185,7 @@ GET  /api/diary                                -> {"account":…,"diary":…}
 POST /api/diary                                -> merge, then return the merged diary
 GET  /api/foods                                -> {"foods":{…}}     (shared)
 POST /api/foods                                -> merge, then return the merged library
+POST /api/activity                             -> record a day's active energy
 ```
 
 `Food` is exactly the shape the Tally client already uses, so the browser

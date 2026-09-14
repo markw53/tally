@@ -361,3 +361,108 @@ func TestCORSAllowsAuthorizationHeader(t *testing.T) {
 func contains(haystack, needle string) bool {
 	return bytes.Contains([]byte(haystack), []byte(needle))
 }
+
+/* ------------------------------------------------------ active energy feed */
+
+func activityOf(t *testing.T, h http.Handler, tok string) map[string]stampedVal {
+	t.Helper()
+	return diaryOf(t, req(t, h, "GET", "/api/diary", tok, nil)).Activity
+}
+
+func TestActivityIsStoredAndReadBack(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+
+	w := req(t, h, "POST", "/api/activity", markTok, map[string]any{"date": "2026-09-13", "kcal": 540})
+	if w.Code != 200 {
+		t.Fatalf("post: %d %s", w.Code, w.Body.String())
+	}
+	a := activityOf(t, h, markTok)
+	if got := string(a["2026-09-13"].Value); got != "540" {
+		t.Errorf("stored %s, want 540", got)
+	}
+	if a["2026-09-13"].UpdatedAt == 0 {
+		t.Error("server did not stamp the entry")
+	}
+}
+
+// Shortcuts often sends numbers as text; refusing that would be a miserable
+// afternoon for whoever is building the automation.
+func TestActivityAcceptsKcalAsString(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+	if w := req(t, h, "POST", "/api/activity", markTok,
+		map[string]any{"date": "2026-09-13", "kcal": "612.4"}); w.Code != 200 {
+		t.Fatalf("string kcal rejected: %d %s", w.Code, w.Body.String())
+	}
+	if got := string(activityOf(t, h, markTok)["2026-09-13"].Value); got != "612" {
+		t.Errorf("stored %s, want 612", got)
+	}
+}
+
+func TestActivityRejectsNonsense(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"bad date", map[string]any{"date": "13/09/2026", "kcal": 100}},
+		{"path traversal in date", map[string]any{"date": "../../etc/passwd", "kcal": 100}},
+		{"negative", map[string]any{"date": "2026-09-13", "kcal": -5}},
+		{"absurd", map[string]any{"date": "2026-09-13", "kcal": 99999}},
+		{"not a number", map[string]any{"date": "2026-09-13", "kcal": "loads"}},
+	}
+	for _, c := range cases {
+		if w := req(t, h, "POST", "/api/activity", markTok, c.body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s gave %d, want 400", c.name, w.Code)
+		}
+	}
+	if w := req(t, h, "POST", "/api/activity", "", map[string]any{"kcal": 100}); w.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated gave %d, want 401", w.Code)
+	}
+}
+
+// The critical one: a phone syncing its diary knows nothing about activity,
+// and must not blank out what the Shortcut posted.
+func TestClientSyncCannotWipeActivity(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+
+	req(t, h, "POST", "/api/activity", markTok, map[string]any{"date": "2026-09-13", "kcal": 540})
+
+	// a normal diary sync, with no activity field at all
+	req(t, h, "POST", "/api/diary", markTok, map[string]any{
+		"days": map[string]any{"2026-09-13": day(1000, `{"Breakfast":[{"name":"Porridge"}]}`)},
+	})
+	if got := string(activityOf(t, h, markTok)["2026-09-13"].Value); got != "540" {
+		t.Fatalf("a diary sync wiped the activity figure: %q", got)
+	}
+
+	// and a client that tries to set activity directly is ignored
+	req(t, h, "POST", "/api/diary", markTok, map[string]any{
+		"activity": map[string]any{
+			"2026-09-13": map[string]any{"updatedAt": 9999999999999, "value": json.RawMessage(`1`)},
+		},
+	})
+	if got := string(activityOf(t, h, markTok)["2026-09-13"].Value); got != "540" {
+		t.Errorf("client overwrote the watch feed: %q", got)
+	}
+}
+
+func TestActivityIsPerAccount(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+	req(t, h, "POST", "/api/activity", markTok, map[string]any{"date": "2026-09-13", "kcal": 540})
+	if a := activityOf(t, h, claireTok); len(a) != 0 {
+		t.Errorf("claire can see mark's activity: %+v", a)
+	}
+}
+
+func TestActivityDefaultsToTodayWhenDateOmitted(t *testing.T) {
+	h := newServer(syncConfig(t)).routes()
+	w := req(t, h, "POST", "/api/activity", markTok, map[string]any{"kcal": 300})
+	if w.Code != 200 {
+		t.Fatalf("omitted date rejected: %d", w.Code)
+	}
+	var out struct{ Date string }
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	if !dateRe.MatchString(out.Date) {
+		t.Errorf("server returned a malformed date: %q", out.Date)
+	}
+}

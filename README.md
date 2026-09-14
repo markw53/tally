@@ -22,7 +22,7 @@ icons/                app icons
 .nojekyll             stops GitHub Pages running the files through Jekyll
 server/               optional Open Food Facts search service (Go)
 tools/                regenerate foods-uk.js from the published CoFID spreadsheet
-test/run.js           97 headless tests
+test/run.js           105 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -53,6 +53,9 @@ No build step, no dependencies, no npm install. It's static files.
   something you've had before works with no signal.
 - **Optional sync and multiple people** — separate private diaries, a shared
   food library, and a switcher for devices two people both use.
+- **Active energy from a watch**, via Apple Health and an iOS Shortcut. Shown
+  under the ring, deliberately *not* added to your calorie goal — see
+  [`server/README.md`](server/README.md) for why.
 
 ---
 
@@ -101,7 +104,7 @@ launch, not the current one. If you want it immediately, bump the version
 string at the top of `sw.js`:
 
 ```js
-const CACHE = "tally-v1.3.1";   // any change to this forces a full refresh
+const CACHE = "tally-v1.4.1";   // any change to this forces a full refresh
 ```
 
 ### One thing to know before you pick
@@ -245,7 +248,7 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-97 tests covering portion arithmetic, the diary, editing, undo, persistence,
+105 tests covering portion arithmetic, the diary, editing, undo, persistence,
 the barcode path, and the layout.
 
 ---

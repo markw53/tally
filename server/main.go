@@ -708,6 +708,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/api/whoami", wrap("GET", s.handleWhoami))
 	mux.HandleFunc("/api/diary", wrap("GET,POST", s.handleDiary))
 	mux.HandleFunc("/api/foods", wrap("GET,POST", s.handleFoods))
+	mux.HandleFunc("/api/activity", wrap("POST", s.handleActivity))
 
 	mux.HandleFunc("/health", wrap("GET", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
