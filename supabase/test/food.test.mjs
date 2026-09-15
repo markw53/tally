@@ -110,5 +110,17 @@ ok("duplicate barcodes are collapsed", dupes.length === 1, String(dupes.length))
 // an empty query shouldn't throw or drop everything
 ok("an empty query is survivable", rankFoods(foods, countries, "").length === foods.length);
 
+console.log("\n— the dashboard copy —");
+{
+  /* People deploying without the CLI paste supabase/dashboard/off.ts into a
+     browser editor. If it drifts from the source, they get an old function
+     and no warning, so this is checked rather than trusted. */
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync(process.execPath,
+    [new URL("../tools/bundle-off.mjs", import.meta.url).pathname, "--check"],
+    { encoding: "utf8" });
+  ok("is in sync with the source", r.status === 0, (r.stderr || r.stdout || "").trim());
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

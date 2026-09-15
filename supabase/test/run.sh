@@ -14,6 +14,15 @@ schema="$here/../schema.sql"
 if [ -n "${PGURL:-}" ]; then
   psql_cmd=(psql "$PGURL")
 else
+  # initdb refuses to run as root, and its own message doesn't say what to do
+  # about it. You want an ordinary user here, or an existing database.
+  if [ "$(id -u)" = "0" ]; then
+    echo "These tests start a throwaway Postgres, and initdb won't run as root." >&2
+    echo "Run this as your normal user, or point it at a database you already have:" >&2
+    echo "  PGURL=postgres://user@localhost/postgres ./supabase/test/run.sh" >&2
+    exit 1
+  fi
+
   export PGBIN="${PGBIN:-$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1)}"
   data="${TMPDIR:-/tmp}/tally-pgtest"
   sock="$data"

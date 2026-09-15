@@ -36,8 +36,9 @@ Barcode scanning works in all three — it goes straight to Open Food Facts.
 
 ## Setting it up
 
-About ten minutes. You need the [Supabase CLI](https://supabase.com/docs/guides/cli)
-for the last step; everything else is the web dashboard.
+About ten minutes, all in the web dashboard. You can do the whole thing
+without installing anything — step 6 offers a CLI route as well, but it's
+optional.
 
 ### 1. Make a project
 
@@ -71,28 +72,86 @@ and write the *shared food library* (not your diary — that's still locked to
 its owner). With sign-ups off, the only accounts that exist are the ones you
 made in step 3.
 
-### 5. Deploy the two functions
+### 5. Set the two secrets
+
+Dashboard → **Edge Functions** → **Secrets**
+(`supabase.com/dashboard/project/_/functions/secrets`). Add both:
+
+| Key | Value |
+|---|---|
+| `OFF_USER_AGENT` | `Tally/1.5 (you@example.com)` |
+| `ALLOWED_ORIGINS` | `https://<you>.github.io` |
+
+Use a **real** contact address. Open Food Facts blocks anonymous scrapers
+rather than merely rate-limiting them, and the function refuses to run without
+one rather than getting your project banned quietly.
+
+`ALLOWED_ORIGINS` is wherever the app is served from, so the browser is allowed
+to call the function. Several are fine, comma-separated.
+
+### 6. Deploy the two functions
+
+Either route works. **A** needs nothing installed; **B** is better if you'll be
+changing them.
+
+#### A — from the dashboard, nothing to install
+
+Dashboard → **Edge Functions** → **Deploy a new function** → **Via Editor**.
+
+1. Name it `off`. Delete the template code, paste all of
+   [`dashboard/off.ts`](dashboard/off.ts) — that's the same function as
+   `functions/off/`, inlined into one file because the editor is one file.
+   Deploy.
+2. New function, name it `activity`, paste
+   [`functions/activity/index.ts`](functions/activity/index.ts). Deploy.
+3. Open the `activity` function's settings and turn **Verify JWT** **off**.
+   Leave it on for `off`.
+
+That last step matters in both directions, so it's worth being deliberate
+about:
+
+- **`activity` must have it off.** An iOS Shortcut can't refresh a JWT, so the
+  function does its own authentication against a hashed device key. With JWT
+  verification on, Apple Health simply never lands.
+- **`off` must have it on.** It's the only thing stopping your project's
+  Open Food Facts quota being a free proxy for anyone who finds the URL.
+
+The dashboard editor has no version history, so treat the repo as the
+original and the dashboard as a copy of it.
+
+#### B — with the CLI
+
+On Fedora, install from the released RPM rather than npm:
+
+```bash
+V=2.117.0
+curl -LO https://github.com/supabase/cli/releases/download/v$V/supabase_${V}_linux_amd64.rpm
+sudo dnf install ./supabase_${V}_linux_amd64.rpm
+supabase --version
+```
+
+Then:
 
 ```bash
 cd supabase
 supabase login
 supabase link --project-ref <your project ref>
-
-# Open Food Facts wants a contact address, and will block an anonymous
-# scraper rather than just rate-limiting it. Use a real one.
-supabase secrets set OFF_USER_AGENT="Tally/1.5 (you@example.com)"
-
-# Where the app is served from, so the browser is allowed to call the function.
-supabase secrets set ALLOWED_ORIGINS="https://<you>.github.io"
-
 supabase functions deploy off
 supabase functions deploy activity
 ```
 
-`config.toml` sets `verify_jwt` correctly for each: `off` requires a signed-in
-caller, `activity` doesn't (see below for why).
+`config.toml` sets `verify_jwt` correctly for each, so route B needs no
+equivalent of step A3.
 
-### 6. Point the app at it
+To update later, `supabase functions deploy <name>` again. The CLI also takes
+the secrets if you'd rather not use the dashboard:
+
+```bash
+supabase secrets set OFF_USER_AGENT="Tally/1.5 (you@example.com)"
+supabase secrets set ALLOWED_ORIGINS="https://<you>.github.io"
+```
+
+### 7. Point the app at it
 
 In Tally: **More → Supabase**. Paste the **Project URL** and the **anon key**,
 both from Dashboard → **Project Settings** → **API**. Save, then sign in under
@@ -217,10 +276,13 @@ node --experimental-strip-types supabase/test/food.test.mjs
 
 ```
 schema.sql              tables, row-level security, and the merge functions
-config.toml             which function needs a JWT and which doesn't
+config.toml             which function needs a JWT and which doesn't (CLI route)
 functions/off/          Open Food Facts search + barcode, with a proper User-Agent
 functions/off/food.ts   the pure conversion and ranking, split out to be testable
 functions/activity/     the Apple Health endpoint, device-key authenticated
+dashboard/off.ts        generated: the above two inlined, for pasting into the
+                        dashboard editor — don't edit, run tools/bundle-off.mjs
+tools/bundle-off.mjs    regenerates it; --check asserts it hasn't drifted
 test/                   schema tests against a local Postgres, plus the above
 ```
 
@@ -230,8 +292,9 @@ test/                   schema tests against a local Postgres, plus the above
 |---|---|
 | "That project doesn't have Tally's tables yet" | step 2 wasn't run, or was run on a different project |
 | Sign-in rejected | the account doesn't exist — create it in Authentication → Users |
-| "The `off` function isn't deployed" | `supabase functions deploy off` |
-| "no contact address set" | `OFF_USER_AGENT` secret missing |
+| "The `off` function isn't deployed" | step 6 — deploy it, and check the name is exactly `off` |
+| "no contact address set" | `OFF_USER_AGENT` secret missing (step 5) |
+| Apple Health posts return 401 | `activity` still has Verify JWT on — step A3 |
 | Search works, the browser console shows CORS | `ALLOWED_ORIGINS` doesn't match where the app is served from |
 | Everything stops after a break | the project paused — dashboard → Resume |
 | The Shortcut posts but nothing appears | check the date it sent; it should be *your* today |
