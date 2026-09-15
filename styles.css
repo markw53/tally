@@ -281,6 +281,23 @@ label.fld span{display:block; font-size:.8rem; color:var(--ink-2); margin-bottom
 .toast span{flex:1}
 .toast button{color:var(--accent); font-weight:700; flex:none}
 
+/* Inline code is mostly URLs, env-var names and endpoints, all of which are
+   longer than a phone is wide. Let them break rather than run off the edge —
+   an endpoint you can't read is no use in the setup instructions. */
+code{
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86em;
+  overflow-wrap:anywhere;
+}
+
+/* A secret shown exactly once — a device key. Deliberately selectable and
+   wrapped rather than truncated, because the whole point is copying it. */
+.keyout{
+  display:block; margin:8px 0; padding:10px 12px;
+  background:var(--surface-2); border:1px solid var(--line); border-radius:10px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8rem;
+  word-break:break-all; user-select:all; -webkit-user-select:all;
+}
+
 @media (min-width:640px){
   .view,.sheet-body{max-width:560px; margin:0 auto; left:0; right:0}
   .sheet-body{border-radius:22px 22px 0 0}

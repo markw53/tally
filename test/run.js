@@ -717,6 +717,237 @@ function ok(name, cond, extra) {
     await ctx6.close();
   }
 
+  console.log("\n— supabase backend —");
+  {
+    const SB = "https://testproj.supabase.co";
+    const ANON = "anon-key-for-tests";
+
+    /* A stub Supabase: auth, the two merge RPCs, and the off function. State
+       is kept here so a test can assert what the client actually sent. */
+    /* URL is taken by this file's own base-address constant, so reach for
+       Node's directly rather than shadowing it back. */
+    const WHATWG = require("url").URL;
+
+    const sb = {
+      tokens: 0, refreshes: 0, rpcs: [], searches: 0, expiresIn: 3600,
+      refuseRefresh: false, functionUp: true, days: {}, activity: {}
+    };
+
+    const ctx7 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p7 = await ctx7.newPage();
+    p7.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+
+    await p7.route(SB + "/auth/v1/token**", route => {
+      const u = new WHATWG(route.request().url());
+      const grant = u.searchParams.get("grant_type");
+      if (grant === "refresh_token") {
+        sb.refreshes++;
+        if (sb.refuseRefresh) {
+          return route.fulfill({ status: 400, contentType: "application/json",
+            body: JSON.stringify({ error: "invalid_grant", error_description: "Refresh Token Not Found" }) });
+        }
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify({ access_token: "access-2", refresh_token: "refresh-1",
+            expires_in: 3600, user: { id: "u1", email: "mark@example.com" } }) });
+      }
+      sb.tokens++;
+      const body = JSON.parse(route.request().postData() || "{}");
+      if (body.password !== "correct-horse") {
+        return route.fulfill({ status: 400, contentType: "application/json",
+          body: JSON.stringify({ error: "invalid_grant", error_description: "Invalid login credentials" }) });
+      }
+      return route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ access_token: "access-1", refresh_token: "refresh-1",
+          expires_in: sb.expiresIn, user: { id: "u1", email: body.email } }) });
+    });
+
+    await p7.route(SB + "/rest/v1/rpc/**", route => {
+      const fn = route.request().url().split("/rpc/")[1];
+      const auth = route.request().headers()["authorization"] || "";
+      const args = JSON.parse(route.request().postData() || "{}");
+      sb.rpcs.push({ fn, auth, args });
+
+      if (fn === "sync_diary") {
+        Object.assign(sb.days, args.p_days || {});
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify({ days: sb.days, weights: {}, activity: sb.activity, settings: null }) });
+      }
+      if (fn === "sync_foods") {
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify({ foods: {} }) });
+      }
+      if (fn === "issue_device_key") {
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify("tk_" + "a".repeat(48)) });
+      }
+      return route.fulfill({ status: 404, contentType: "application/json",
+        body: JSON.stringify({ message: "function does not exist" }) });
+    });
+
+    await p7.route(SB + "/functions/v1/off**", route => {
+      if (!sb.functionUp) return route.abort("failed");
+      const u = new WHATWG(route.request().url());
+      if (u.searchParams.get("code")) {
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify({ food: { id: "o_5000", name: "Baked Beans", brand: "Heinz",
+            code: "5000", source: "off", per100: { k: 78, p: 4.7, c: 12.9, f: 0.2 },
+            portions: [{ label: "half a tin (207 g)", g: 207 }] } }) });
+      }
+      sb.searches++;
+      return route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ foods: [{ id: "o_1", name: "Hovis Wholemeal", brand: "Hovis",
+          code: "1", source: "off", per100: { k: 217, p: 9.4, c: 42, f: 2.5 }, portions: [] }] }) });
+    });
+
+    /* Nothing should reach USDA or Open Food Facts directly while Supabase is
+       configured and reachable; if it does, these fail loudly rather than
+       quietly succeeding against the real internet. */
+    let directOff = 0, usdaHits = 0;
+    await p7.route("**/world.openfoodfacts.org/**", route => {
+      directOff++;
+      route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ status: 1, product: { code: "5000", product_name: "Beans (direct)",
+          nutriments: { "energy-kcal_100g": 78, proteins_100g: 4.7, carbohydrates_100g: 12.9, fat_100g: 0.2 } } }) });
+    });
+    await p7.route("**/api.nal.usda.gov/**", route => {
+      usdaHits++;
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ foods: [] }) });
+    });
+
+    await p7.goto(URL, { waitUntil: "networkidle" });
+    await p7.click('.tab[data-view="settings"]');
+
+    // an offproxy address is also set, to prove which one wins
+    await p7.fill("#setServer", "https://old-offproxy.example.com");
+    await p7.click("#saveUsda");
+    await p7.waitForTimeout(150);
+
+    await p7.fill("#setSbUrl", SB);
+    await p7.fill("#setSbKey", ANON);
+    await p7.click("#saveSb");
+    await p7.waitForTimeout(250);
+
+    ok("a configured project takes precedence over offproxy",
+       await p7.evaluate(() => backend()) === "supabase");
+    ok("it asks you to sign in", await p7.locator("#sbSignInBtn").isVisible());
+
+    // wrong password
+    await p7.fill("#sbEmail", "mark@example.com");
+    await p7.fill("#sbPass", "wrong");
+    await p7.click("#sbSignInBtn");
+    await p7.waitForTimeout(400);
+    ok("a bad password says so, and points at where accounts are made",
+       /weren't accepted/.test(await p7.locator("#sbOut").textContent()));
+    ok("and doesn't claim to be signed in", !(await p7.evaluate(() => sbSignedIn())));
+
+    // right password
+    await p7.fill("#sbPass", "correct-horse");
+    await p7.click("#sbSignInBtn");
+    await p7.waitForTimeout(700);
+    ok("signing in works", await p7.evaluate(() => sbSignedIn()));
+    ok("and says who you are", /mark@example.com/.test(await p7.locator("#view-settings").textContent()));
+    ok("it syncs straight away", sb.rpcs.some(r => r.fn === "sync_diary"));
+    ok("the access token is what's sent, not the anon key",
+       sb.rpcs[0].auth === "Bearer access-1", sb.rpcs[0].auth);
+
+    // the payload shape Postgres expects
+    const firstSync = sb.rpcs.find(r => r.fn === "sync_diary");
+    ok("the merge gets named arguments",
+       "p_days" in firstSync.args && "p_weights" in firstSync.args && "p_settings" in firstSync.args,
+       JSON.stringify(Object.keys(firstSync.args)));
+
+    // logging something syncs it up
+    await p7.click('.tab[data-view="today"]');
+    await p7.click('[data-addmeal="Breakfast"]');
+    await p7.click('#srcChips .chip[data-src="quick"]');
+    await p7.fill("#qaK", "420");
+    await p7.click("#qaAdd");
+    await p7.waitForTimeout(5200);          // the debounce is 4s
+    const pushed = sb.rpcs.filter(r => r.fn === "sync_diary").pop();
+    const anyDay = Object.values(pushed.args.p_days || {})[0];
+    ok("a logged entry is pushed with a timestamp",
+       !!anyDay && anyDay.updatedAt > 0 && JSON.stringify(anyDay.meals).includes("420"),
+       JSON.stringify(anyDay).slice(0, 120));
+
+    // search goes through the edge function
+    await p7.click('[data-addmeal="Lunch"]');
+    await p7.fill("#searchInput", "hovis wholemeal");
+    await p7.waitForTimeout(1000);
+    ok("typed search uses the edge function", sb.searches > 0);
+    ok("and not USDA", usdaHits === 0, "usda hits: " + usdaHits);
+    ok("results are shown", /Hovis/.test(await p7.locator("#results").textContent()));
+    await p7.keyboard.press("Escape");
+    await p7.waitForTimeout(200);
+
+    // an expired access token refreshes rather than failing
+    await p7.evaluate(() => {
+      const p = P.list.find(x => x.id === P.active);
+      p.session.expires_at = Date.now() - 1000;
+      saveProfiles();
+    });
+    const before = sb.refreshes;
+    await p7.click('.tab[data-view="settings"]');
+    await p7.click("#syncNowBtn");
+    await p7.waitForTimeout(800);
+    ok("an expired token is refreshed transparently", sb.refreshes === before + 1);
+    ok("and the sync still lands",
+       sb.rpcs[sb.rpcs.length - 1].auth === "Bearer access-2", sb.rpcs[sb.rpcs.length - 1].auth);
+
+    // active energy arrives over this backend too, and is still not spent
+    sb.activity[await p7.evaluate(() => curDate)] = { updatedAt: Date.now(), value: 480 };
+    await p7.click("#syncNowBtn");
+    await p7.waitForTimeout(700);
+    await p7.click('.tab[data-view="today"]');
+    await p7.waitForTimeout(250);
+    ok("active energy shows on Supabase too", await p7.locator("#activeLine").isVisible());
+    const g = await p7.locator("#sumGoal").textContent();
+    const fd = await p7.locator("#sumFood").textContent();
+    const lf = await p7.locator("#sumLeft").textContent();
+    ok("and still isn't added to the goal (Model A)",
+       Number(lf) === Number(g) - Number(fd), `${g} - ${fd} = ${lf}`);
+
+    // barcode falls back to Open Food Facts when the function is unreachable
+    sb.functionUp = false;
+    const before2 = directOff;
+    const viaFallback = await p7.evaluate(async () => {
+      try { return (await lookupBarcode("5000")).name; } catch (e) { return "ERR:" + e.message; }
+    });
+    ok("a scan still works when the function is down",
+       directOff === before2 + 1 && /direct/.test(viaFallback), viaFallback);
+    sb.functionUp = true;
+
+    // a device key for the Shortcut, shown once
+    await p7.click('.tab[data-view="settings"]');
+    await p7.click("#sbKeyBtn");
+    await p7.waitForTimeout(500);
+    const keyTxt = await p7.locator("#sbKeyOut").textContent();
+    ok("a device key is issued and shown", /tk_aaaa/.test(keyTxt), keyTxt.slice(0, 80));
+    ok("with a warning that it won't be shown again", /won't be shown again/.test(keyTxt));
+    ok("and the endpoint to post it to", /functions\/v1\/activity/.test(keyTxt));
+
+    // a refused refresh must clear the session rather than retry forever
+    sb.refuseRefresh = true;
+    await p7.evaluate(() => {
+      const p = P.list.find(x => x.id === P.active);
+      p.session.expires_at = Date.now() - 1000;
+      saveProfiles();
+    });
+    const before3 = sb.refreshes;
+    await p7.click("#syncNowBtn");
+    await p7.waitForTimeout(900);
+    ok("a dead refresh token signs you out", !(await p7.evaluate(() => sbSignedIn())));
+    ok("rather than retrying in a loop", sb.refreshes === before3 + 1, "refreshes: " + (sb.refreshes - before3));
+    await p7.click('.tab[data-view="settings"]');
+    ok("and the card asks you to sign in again", await p7.locator("#sbSignInBtn").isVisible());
+
+    // the diary survives all of that
+    await p7.click('.tab[data-view="today"]');
+    ok("entries are untouched by a signed-out session",
+       (await p7.locator("#sumFood").textContent()) === "420");
+
+    await ctx7.close();
+  }
+
   console.log("\n— export —");
   const dl = page.waitForEvent("download", { timeout: 5000 }).catch(() => null);
   await page.click('.tab[data-view="settings"]');

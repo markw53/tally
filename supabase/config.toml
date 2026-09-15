@@ -1,0 +1,17 @@
+# Supabase CLI project config. Only the bits Tally needs are set here; the
+# rest come from the CLI's defaults.
+#
+# Replace project_id with your own (Dashboard -> Project Settings -> General).
+
+project_id = "tally"
+
+[functions.off]
+# Search costs your project's quota, so require a signed-in caller. The app
+# sends the user's access token; nobody else's requests get through.
+verify_jwt = true
+
+[functions.activity]
+# Off deliberately. An iOS Shortcut cannot refresh a JWT unattended, so this
+# function authenticates its own way — a hashed device key, checked against
+# device_keys. The function is public; the key is what isn't.
+verify_jwt = false

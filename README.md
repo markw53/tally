@@ -21,8 +21,9 @@ manifest.json         makes it installable
 icons/                app icons
 .nojekyll             stops GitHub Pages running the files through Jekyll
 server/               optional Open Food Facts search service (Go)
+supabase/             optional sync on Supabase's free tier — schema + 2 functions
 tools/                regenerate foods-uk.js from the published CoFID spreadsheet
-test/run.js           105 headless tests
+test/run.js           130 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -42,8 +43,9 @@ No build step, no dependencies, no npm install. It's static files.
   network, no API key and no rate limit.
 - **Real portion sizes** on the everyday items — a slice of bread, a medium
   banana, half a tin — which the reference data itself doesn't carry.
-- **Typed search needs nothing.** Optionally add your own Open Food Facts search
-  server (see `server/`) for branded products, or a USDA key for American foods.
+- **Typed search needs nothing.** Optionally add branded-product search via
+  Supabase (see `supabase/`) or your own server (`server/`), or a USDA key for
+  American foods.
 - **Quick add** for when you only know the calorie figure.
 - **Recents and frequents**, so a repeat food is two taps.
 - **Custom foods** for anything with no barcode.
@@ -52,7 +54,9 @@ No build step, no dependencies, no npm install. It's static files.
 - **Works offline** once installed — scanned products are cached, so re-scanning
   something you've had before works with no signal.
 - **Optional sync and multiple people** — separate private diaries, a shared
-  food library, and a switcher for devices two people both use.
+  food library, and a switcher for devices two people both use. Either on
+  [Supabase's free tier](supabase/README.md) with nothing of your own running,
+  or on [your own box](server/README.md).
 - **Active energy from a watch**, via Apple Health and an iOS Shortcut. Shown
   under the ring, deliberately *not* added to your calorie goal — see
   [`server/README.md`](server/README.md) for why.
@@ -143,6 +147,7 @@ search (your own server) or American foods (a free USDA key) — neither is need
 | `foods-uk.js` — [CoFID](https://www.gov.uk/government/publications/composition-of-foods-integrated-dataset-cofid) | typed search | no | 2,854 UK foods, offline, Open Government Licence v3.0 |
 | `foods.js` | the everyday items | no | portion sizes on top of CoFID values |
 | [Open Food Facts](https://world.openfoodfacts.org) | barcode lookups | no | branded products, ODbL licensed |
+| Open Food Facts via `supabase/` | branded typed search | no | optional; free tier, nothing to run |
 | Open Food Facts via `server/` | branded typed search | no | optional; needs offproxy running |
 | [USDA FoodData Central](https://fdc.nal.usda.gov) | American generic foods | free, optional | only if you paste a key in |
 
@@ -177,6 +182,24 @@ answers "not available to anonymous users", and neither `search.openfoodfacts.or
 nor `/api/v2/search` will talk to a web page. Their *barcode* endpoint has no
 such restriction, which is why scanning works directly and typed search doesn't.
 
+## Optional: sync, two ways
+
+Neither is needed — the app is complete without one. Both add the same three
+things: a diary that follows you between devices, separate accounts for two
+people, and branded typed search from Open Food Facts.
+
+**[Supabase](supabase/README.md)** is the one to pick if you just want it to
+work. Free tier, about ten minutes, nothing of yours left running. Postgres
+enforces the privacy between the two diaries itself, which is a stronger
+guarantee than any code of mine. The catch is that a free project pauses after
+7 days with no activity and you press Resume in the dashboard — which a diary
+you open daily never hits, and which loses nothing when it does.
+
+**[offproxy](server/README.md)** is the one to pick if you'd rather own it. A
+single Go binary with no dependencies on a machine you control — a spare
+laptop and Tailscale Funnel does it for nothing. No third party involved, and
+it never pauses.
+
 ## Optional: your own search server
 
 `server/` contains **offproxy** — a small dependency-free Go service that fixes
@@ -204,12 +227,13 @@ exactly as before.
 Tally handles a household. Each person gets their own diary, and the two
 things that differ are handled separately:
 
-- **Diaries are private.** Each account's diary is reachable only with that
-  account's own sync token. The server derives who you are from the token —
-  a client never gets to claim an identity — so one person's device cannot
-  fetch the other's diary however it asks.
+- **Diaries are private.** Who you are is derived from your sign-in (Supabase)
+  or your sync token (offproxy) — a client never gets to claim an identity —
+  so one person's device cannot fetch the other's diary however it asks. On
+  Supabase this is row-level security, so it's the database refusing rather
+  than my code remembering to.
 - **Custom foods are shared.** Create "Mum's lasagne, 180 kcal per 100 g"
-  once and everyone on your server can log it. That's the point.
+  once and everyone in the household can log it. That's the point.
 
 On a shared device (an iPad, a family laptop) add each person under
 **More → Who uses this device**. Whoever is currently logging is shown in a
@@ -217,14 +241,16 @@ band across the top of every screen, and tapping it switches. That band is
 deliberately hard to miss — logging your lunch into someone else's diary is
 the one mistake worth designing against.
 
-Each person needs a sync token from `OFFPROXY_ACCOUNTS` pasted into
-**More → Sync**. Without a token a profile simply stays on that device.
+Each person signs in under **More → Sync** — with their own email and password
+on Supabase, or a token from `OFFPROXY_ACCOUNTS` on offproxy. Without that, a
+profile simply stays on that device.
 
 Sync merges rather than overwrites, per day: a phone that's been offline for a
 week uploads its days without wiping newer ones from the laptop. The limit is
 that resolution is per *day* — edit the same day on two devices while one is
-offline and the later edit wins that day outright. See
-[`server/README.md`](server/README.md) for the details.
+offline and the later edit wins that day outright. (On Supabase each day is
+its own row, so two devices editing *different* days can't lose one of them;
+offproxy merges whole documents and is slightly weaker here.)
 
 ## Your data
 
@@ -248,8 +274,17 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-105 tests covering portion arithmetic, the diary, editing, undo, persistence,
-the barcode path, and the layout.
+130 tests covering portion arithmetic, the diary, editing, undo, persistence,
+the barcode path, both sync backends, and the layout.
+
+The optional pieces carry their own, none of which need a network or an
+account:
+
+```bash
+cd server && go test ./...                                   # 33
+./supabase/test/run.sh                                       # schema + RLS
+node --experimental-strip-types supabase/test/food.test.mjs  # 18
+```
 
 ---
 

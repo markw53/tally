@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -86,6 +86,8 @@ const DEFAULTS = {
   goal: 2000,
   macroPct: { p: 25, c: 45, f: 30 },
   serverUrl: "",    // your offproxy instance; when set it replaces USDA for search
+  sbUrl: "",        // your Supabase project URL; when set it takes precedence
+  sbKey: "",        // the project's anon key — public by design, safe in here
   usdaKey: "",
   diary: {},        // "YYYY-MM-DD" -> { Breakfast:[entry], ... }
   custom: [],       // user-created foods (shared with the household when syncing)
@@ -202,17 +204,19 @@ async function lookupBarcode(code) {
   if (S.offCache[code]) return S.offCache[code];
 
   let food;
-  if (serverBase()) {
+  const via = backend();
+  if (via) {
     try {
-      food = await proxyProduct(code);
+      food = via === "supabase" ? await sbProduct(code) : await proxyProduct(code);
     } catch (e) {
       /* "no such product" and "no nutrition data" are real answers — going to
          Open Food Facts directly would only get the same reply. But if the
          server is simply unreachable or busy, fall back: Open Food Facts'
          product endpoint works from the browser, and a scanner that dies in
-         the supermarket because a server at home is off is useless. */
+         the supermarket because a server at home is off is useless. The same
+         goes for a signed-out session or a paused Supabase project. */
       if (e.notFound || e.noNutrition) throw e;
-      console.warn("Search server unavailable, going direct to Open Food Facts:", e.message);
+      console.warn("Lookup service unavailable, going direct to Open Food Facts:", e.message);
       food = await directProduct(code);
     }
   } else {
@@ -272,15 +276,219 @@ function normaliseFood(f) {
 }
 
 /* ============================================================
+   SUPABASE BACKEND
+
+   The alternative to running offproxy yourself: Supabase's free
+   tier gives Postgres, accounts and two small serverless
+   functions for nothing, with no machine of your own left on.
+
+   There's no SDK here on purpose. Supabase's REST API is plain
+   HTTP, and pulling ~120 KB of library off a CDN would cost this
+   app its "works with no network" property for no gain.
+
+   Which backend is in use is derived rather than configured: a
+   project URL and key mean Supabase, otherwise an offproxy
+   address means offproxy, otherwise neither.
+   ============================================================ */
+
+function sbBase() { return (S.sbUrl || "").trim().replace(/\/+$/, ""); }
+function sbConfigured() { return !!(sbBase() && (S.sbKey || "").trim()); }
+
+function backend() {
+  if (sbConfigured()) return "supabase";
+  if (serverBase()) return "offproxy";
+  return "";
+}
+
+/* The session lives beside the profile it belongs to, so a shared iPad can
+   hold Mark signed in and Claire signed in at once and switching between
+   them doesn't mean signing in again. */
+function sbSession() { const p = activeProfile(); return (p && p.session) || null; }
+function sbSignedIn() { return !!(sbSession() && sbSession().refresh_token); }
+function sbEmail() { const s = sbSession(); return s ? s.email || "" : ""; }
+
+function sbSetSession(sess) {
+  const p = activeProfile();
+  if (!p) return;
+  p.session = sess;
+  saveProfiles();
+}
+
+function sbHeaders(token) {
+  const h = { "Content-Type": "application/json", apikey: (S.sbKey || "").trim() };
+  if (token) h.Authorization = "Bearer " + token;
+  return h;
+}
+
+function sbAuthError(status, body) {
+  const msg = (body && (body.error_description || body.msg || body.message)) || "";
+  const e = new Error(msg || "auth " + status);
+  e.status = status;
+  if (status === 400 || status === 401) e.auth = true;
+  e.detail = msg;
+  return e;
+}
+
+async function sbSignIn(email, password) {
+  const res = await fetch(`${sbBase()}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: sbHeaders(),
+    body: JSON.stringify({ email: email.trim(), password })
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw sbAuthError(res.status, body);
+
+  sbSetSession({
+    access_token: body.access_token,
+    refresh_token: body.refresh_token,
+    expires_at: Date.now() + (body.expires_in || 3600) * 1000,
+    email: (body.user && body.user.email) || email.trim(),
+    user_id: body.user && body.user.id
+  });
+  return sbSession();
+}
+
+/* Access tokens last an hour. Refresh a minute early rather than letting a
+   sync fail and having to explain why. */
+let sbRefreshing = null;
+async function sbToken() {
+  const s = sbSession();
+  if (!s) { const e = new Error("signed out"); e.auth = true; throw e; }
+  if (s.access_token && Date.now() < (s.expires_at || 0) - 60000) return s.access_token;
+  if (sbRefreshing) return sbRefreshing;
+
+  sbRefreshing = (async () => {
+    const res = await fetch(`${sbBase()}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: sbHeaders(),
+      body: JSON.stringify({ refresh_token: s.refresh_token })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      /* A refused refresh token is gone for good — the password changed, or
+         the session was revoked. Clear it so the UI asks for a sign-in
+         instead of retrying forever. */
+      if (res.status === 400 || res.status === 401) sbSetSession(null);
+      throw sbAuthError(res.status, body);
+    }
+    sbSetSession({
+      access_token: body.access_token,
+      refresh_token: body.refresh_token || s.refresh_token,
+      expires_at: Date.now() + (body.expires_in || 3600) * 1000,
+      email: (body.user && body.user.email) || s.email,
+      user_id: (body.user && body.user.id) || s.user_id
+    });
+    return body.access_token;
+  })().finally(() => { sbRefreshing = null; });
+
+  return sbRefreshing;
+}
+
+function sbSignOut() {
+  const s = sbSession();
+  if (s && s.access_token) {
+    /* Best effort — if it fails the local session is cleared anyway, which is
+       what actually matters on this device. */
+    fetch(`${sbBase()}/auth/v1/logout`, { method: "POST", headers: sbHeaders(s.access_token) })
+      .catch(() => {});
+  }
+  sbSetSession(null);
+}
+
+/* A stored procedure call. All the merging happens in Postgres — see
+   supabase/schema.sql — so this is one round trip per half of the sync. */
+async function sbRpc(fn, args) {
+  const token = await sbToken();
+  let res;
+  try {
+    res = await fetch(`${sbBase()}/rest/v1/rpc/${fn}`, {
+      method: "POST", headers: sbHeaders(token), body: JSON.stringify(args || {})
+    });
+  } catch (e) {
+    const err = new Error("unreachable");
+    err.server = true;
+    err.kind = location.protocol === "file:" ? "file" : "network";
+    throw err;
+  }
+  if (res.status === 401) { const e = new Error("unauthorized"); e.auth = true; throw e; }
+  if (!res.ok) {
+    let detail = "";
+    try { const j = await res.json(); detail = j.message || j.hint || j.error || ""; } catch (e) { /* not JSON */ }
+    const e = new Error("http " + res.status);
+    e.status = res.status; e.detail = detail;
+    /* A missing function means the SQL was never run — worth saying so plainly
+       rather than showing a bare 404. */
+    if (res.status === 404) e.noSchema = true;
+    throw e;
+  }
+  return res.json();
+}
+
+async function sbFn(path, { signal } = {}) {
+  const token = await sbToken();
+  let res;
+  try {
+    res = await fetch(`${sbBase()}/functions/v1/${path}`, { headers: sbHeaders(token), signal });
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    const err = new Error("unreachable");
+    err.server = true;
+    err.kind = location.protocol === "file:" ? "file" : "network";
+    throw err;
+  }
+  return res;
+}
+
+async function sbSearch(q, signal) {
+  const res = await sbFn(`off?${new URLSearchParams({ q, limit: "20" })}`, { signal });
+  if (!res.ok) {
+    let detail = "", code = "";
+    try { const j = await res.json(); detail = (j.error && j.error.message) || ""; code = (j.error && j.error.code) || ""; } catch (e) { /* not JSON */ }
+    const e = new Error("search " + res.status);
+    e.server = true; e.status = res.status; e.detail = detail;
+    e.kind = res.status === 503 ? "rate" : (res.status === 404 ? "nofunc" : (res.status === 502 ? "upstream" : "http"));
+    if (code === "NO_USER_AGENT") e.kind = "noua";
+    throw e;
+  }
+  const j = await res.json();
+  return (j.foods || []).map(normaliseFood);
+}
+
+async function sbProduct(code) {
+  const res = await sbFn(`off?${new URLSearchParams({ code })}`);
+  if (res.status === 404) { const e = new Error("not-found"); e.notFound = true; throw e; }
+  if (res.status === 422) { const e = new Error("no-nutrition"); e.noNutrition = true; throw e; }
+  if (!res.ok) {
+    const e = new Error("server " + res.status);
+    e.server = true; e.status = res.status;
+    e.kind = res.status === 503 ? "rate" : "http";
+    throw e;
+  }
+  const j = await res.json();
+  if (!j.food) { const e = new Error("no-nutrition"); e.noNutrition = true; throw e; }
+  return normaliseFood(j.food);
+}
+
+/* Issued once and never recoverable — only its hash is kept. Used by the iOS
+   Shortcut, which has nowhere to keep a refreshable session. */
+async function sbIssueDeviceKey(label) {
+  return sbRpc("issue_device_key", { p_label: label || "iPhone" });
+}
+
+/* ============================================================
    SYNC
-   Diaries are per account and private to their token. The food
-   library is shared across the household on purpose.
+   Diaries are per account and private — to their sync token on
+   offproxy, or to their sign-in on Supabase. The food library is
+   shared across the household on purpose.
    ============================================================ */
 
 let syncTimer = null, syncing = false;
 let syncStatus = { state: "idle", at: 0, msg: "" };   // idle | ok | error | off
 
-function syncEnabled() { return !!(serverBase() && (activeProfile().token || "").trim()); }
+function syncEnabled() {
+  if (backend() === "supabase") return sbSignedIn();
+  return !!(serverBase() && (activeProfile().token || "").trim());
+}
 
 function authHeaders() {
   return { "Content-Type": "application/json", Authorization: "Bearer " + activeProfile().token.trim() };
@@ -392,11 +600,24 @@ async function syncNow(manual = false) {
   if (manual) toast("Syncing…");
 
   try {
-    const d = await syncPost("/api/diary", diaryPayload());
-    applyDiary(d.diary);
+    if (backend() === "supabase") {
+      const p = diaryPayload();
+      /* Postgres does the merging; the payload shape is identical to the Go
+         server's, so applyDiary/applyFoods don't care which answered. */
+      const d = await sbRpc("sync_diary", {
+        p_days: p.days, p_weights: p.weights, p_settings: p.settings
+      });
+      applyDiary(d);
 
-    const f = await syncPost("/api/foods", foodsPayload());
-    applyFoods(f.foods);
+      const f = await sbRpc("sync_foods", { p_foods: foodsPayload().foods });
+      applyFoods(f.foods);
+    } else {
+      const d = await syncPost("/api/diary", diaryPayload());
+      applyDiary(d.diary);
+
+      const f = await syncPost("/api/foods", foodsPayload());
+      applyFoods(f.foods);
+    }
 
     S.lastSync = Date.now();
     syncStatus = { state: "ok", at: S.lastSync, msg: "" };
@@ -418,6 +639,12 @@ async function syncNow(manual = false) {
 }
 
 function syncErrorText(e) {
+  if (backend() === "supabase") {
+    if (e.auth) return "Signed out — sign in again under Sync to start syncing.";
+    if (e.noSchema) return "That project doesn't have Tally's tables yet. Run supabase/schema.sql in the SQL Editor.";
+    if (e.status) return `Supabase returned HTTP ${e.status}${e.detail ? " — " + e.detail : ""}.`;
+    return "Couldn't reach Supabase. Your entries are saved on this device and will sync when it's back.";
+  }
   if (e.auth) return "The server didn't recognise that sync token. Check it matches one in OFFPROXY_ACCOUNTS.";
   if (e.noSync) return "That server is running, but sync isn't switched on (no OFFPROXY_DATA / OFFPROXY_ACCOUNTS).";
   if (e.status) return `The server returned HTTP ${e.status}${e.detail ? " — " + e.detail : ""}.`;
@@ -425,8 +652,15 @@ function syncErrorText(e) {
 }
 
 function syncSummary() {
-  if (!serverBase()) return "No server set — this device keeps its diary to itself.";
-  if (!(activeProfile().token || "").trim()) return "No sync token for this profile, so nothing is being synced.";
+  if (backend() === "supabase") {
+    if (!sbSignedIn()) return "Not signed in, so this device is keeping its diary to itself.";
+    if (syncStatus.state === "error") return syncStatus.msg;
+    if (!S.lastSync) return `Signed in as ${sbEmail()}. Not synced yet.`;
+  }
+  if (!backend()) return "No server set — this device keeps its diary to itself.";
+  if (backend() === "offproxy" && !(activeProfile().token || "").trim()) {
+    return "No sync token for this profile, so nothing is being synced.";
+  }
   if (syncStatus.state === "error") return syncStatus.msg;
   if (!S.lastSync) return "Not synced yet.";
   const mins = Math.round((Date.now() - S.lastSync) / 60000);
@@ -461,15 +695,17 @@ async function switchProfile(id) {
    than the main event. Your server if you have one; USDA only if you've gone
    to the trouble of getting a key; otherwise nothing, and no key to set up. */
 function remoteSearchAvailable() {
+  if (backend() === "supabase") return sbSignedIn();
   return !!serverBase() || !!(S.usdaKey || "").trim();
 }
 async function searchRemote(q, signal) {
+  if (backend() === "supabase" && sbSignedIn()) return sbSearch(q, signal);
   if (serverBase()) return proxySearch(q, signal);
   if ((S.usdaKey || "").trim()) return usdaSearch(q, signal);
   return [];
 }
 function searchSourceLabel() {
-  return serverBase() ? "Open Food Facts" : "Reference foods (USDA)";
+  return backend() ? "Open Food Facts" : "Reference foods (USDA)";
 }
 
 async function proxySearch(q, signal) {
@@ -862,6 +1098,33 @@ function renderTrends() {
 }
 
 /* ---------------- Settings ---------------- */
+/* The sync card's Supabase half: sign in, or once you are, who you are and
+   the device key the iOS Shortcut needs. */
+function supabaseSyncCard() {
+  if (!sbSignedIn()) {
+    return `
+      <p>Sign in as ${esc(profileLabel())}. Each person signs in as themselves — diaries are separate, the food library is shared.</p>
+      <label class="fld"><span>Email</span>
+        <input type="email" id="sbEmail" autocomplete="username" spellcheck="false" inputmode="email" placeholder="you@example.com"></label>
+      <label class="fld"><span>Password</span>
+        <input type="password" id="sbPass" autocomplete="current-password"></label>
+      <div class="btnrow">
+        <button class="primary" id="sbSignInBtn">Sign in</button>
+      </div>
+      <p>Accounts are created in the Supabase dashboard, not here — see the setup guide. Sign-ups should stay switched off so the project stays yours.</p>`;
+  }
+  return `
+    <p>Signed in as <b>${esc(sbEmail())}</b> for the ${esc(profileLabel())} profile.</p>
+    <div class="btnrow">
+      <button class="ghost" id="syncNowBtn">Sync now</button>
+      <button class="ghost" id="sbSignOutBtn">Sign out</button>
+    </div>
+    <h4>Active energy from your watch</h4>
+    <p>A device key lets an iOS Shortcut post your Apple Health active energy without holding a password. It's shown once and stored only as a hash, so if you lose it you issue another.</p>
+    <div class="btnrow"><button class="ghost" id="sbKeyBtn">Issue a device key</button></div>
+    <p id="sbKeyOut"></p>`;
+}
+
 function renderSettings() {
   const m = S.macroPct;
   $("#settingsBody").innerHTML = `
@@ -926,7 +1189,9 @@ function renderSettings() {
 
     <div class="card">
       <h3>Who uses this device</h3>
-      <p>Each person gets their own diary here. Their sync token is what tells the server whose diary it is, so one person's token can never fetch the other's. Custom foods are shared across the household on purpose.</p>
+      <p>Each person gets their own diary here. ${backend() === "supabase"
+        ? "Who they're signed in as is what tells Supabase whose diary it is, and row-level security means one account genuinely cannot read the other's."
+        : "Their sync token is what tells the server whose diary it is, so one person's token can never fetch the other's."} Custom foods are shared across the household on purpose.</p>
       <div class="list">
         ${P.list.map(p => `
           <div class="prow${p.id === P.active ? " is-active" : ""}">
@@ -944,13 +1209,29 @@ function renderSettings() {
     <div class="card">
       <h3>Sync</h3>
       <p>${esc(syncSummary())}</p>
+      ${backend() === "supabase" ? supabaseSyncCard() : `
       <label class="fld"><span>Sync token for ${esc(profileLabel())}</span>
         <input type="password" id="setToken" value="${esc(activeProfile().token || "")}" placeholder="paste the token from OFFPROXY_ACCOUNTS" autocomplete="off" spellcheck="false"></label>
       <p>Generate one on the server with <code>offproxy -gen-token</code>, add it to <code>OFFPROXY_ACCOUNTS</code>, and paste the same value here. Without a token this profile stays on this device.</p>
       <div class="btnrow">
         <button class="primary" id="saveToken">Save token</button>
         <button class="ghost" id="syncNowBtn">Sync now</button>
+      </div>`}
+    </div>
+
+    <div class="card">
+      <h3>Supabase</h3>
+      <p>The other way to sync, with nothing of your own left running. Supabase's free tier covers a household comfortably — see <code>supabase/README.md</code> for the ten-minute setup.</p>
+      <label class="fld"><span>Project URL</span>
+        <input type="text" id="setSbUrl" value="${esc(S.sbUrl)}" placeholder="https://abcdefgh.supabase.co" autocomplete="off" spellcheck="false" inputmode="url"></label>
+      <label class="fld"><span>Anon key</span>
+        <input type="text" id="setSbKey" value="${esc(S.sbKey)}" placeholder="eyJhbGciOi..." autocomplete="off" spellcheck="false"></label>
+      <p>Both are on the project's API settings page. The anon key is meant to be public — it's row-level security, not this key, that keeps your diary private.</p>
+      <div class="btnrow">
+        <button class="primary" id="saveSb">Save</button>
+        ${sbConfigured() ? `<button class="ghost" id="clearSb">Stop using Supabase</button>` : ""}
       </div>
+      <p id="sbOut"></p>
     </div>
 
     <div class="card">
@@ -1017,9 +1298,11 @@ function renderSettings() {
     try {
       const list = await searchRemote("apple");
       if (!list.length) { out.textContent = "Connected, but that search returned nothing. Odd, but not a connection problem."; return; }
-      out.innerHTML = serverBase()
-        ? `Working — ${list.length} results from Open Food Facts via your server.`
-        : `Working — ${list.length} results from USDA, using ${S.usdaKey ? "your key" : "the shared demo key"}.`;
+      out.innerHTML = backend() === "supabase"
+        ? `Working — ${list.length} results from Open Food Facts via Supabase.`
+        : serverBase()
+          ? `Working — ${list.length} results from Open Food Facts via your server.`
+          : `Working — ${list.length} results from USDA, using ${S.usdaKey ? "your key" : "the shared demo key"}.`;
     } catch (e) {
       out.innerHTML = searchErrorText(e);
     }
@@ -1058,13 +1341,78 @@ function renderSettings() {
   };
 
   /* --- sync --- */
-  $("#saveToken").onclick = () => {
+  if ($("#saveToken")) $("#saveToken").onclick = () => {
     activeProfile().token = $("#setToken").value.trim();
     saveProfiles();
     renderSettings();
     if (syncEnabled()) syncNow(true); else toast("Token cleared");
   };
-  $("#syncNowBtn").onclick = () => syncNow(true);
+  if ($("#syncNowBtn")) $("#syncNowBtn").onclick = () => syncNow(true);
+
+  /* --- supabase --- */
+  $("#saveSb").onclick = () => {
+    const url = $("#setSbUrl").value.trim().replace(/\/+$/, "");
+    const key = $("#setSbKey").value.trim();
+    if (url && !/^https:\/\/[^\s/]+/.test(url)) {
+      $("#sbOut").textContent = "That should be the https:// project URL from your API settings.";
+      return;
+    }
+    S.sbUrl = url; S.sbKey = key;
+    save(false);
+    renderSettings();
+    toast(url && key ? "Supabase set — sign in below" : "Saved");
+  };
+
+  if ($("#clearSb")) $("#clearSb").onclick = () => {
+    if (!confirm("Stop using Supabase on this device?\n\nYour diary stays here. Anything already synced stays in the project.")) return;
+    sbSignOut();
+    S.sbUrl = ""; S.sbKey = "";
+    save(false);
+    renderSettings();
+    toast("Supabase disconnected");
+  };
+
+  if ($("#sbSignInBtn")) $("#sbSignInBtn").onclick = async () => {
+    const out = $("#sbOut");
+    const email = $("#sbEmail").value.trim(), pass = $("#sbPass").value;
+    if (!email || !pass) { out.textContent = "Email and password, please."; return; }
+    out.textContent = "Signing in…";
+    try {
+      await sbSignIn(email, pass);
+      out.textContent = "";
+      renderSettings();
+      syncNow(true);
+    } catch (e) {
+      /* The most common cause by far is an account that was never created,
+         since sign-ups are meant to be off. Say so rather than "invalid". */
+      out.innerHTML = e.auth
+        ? `That email and password weren't accepted. If the account hasn't been created yet, add it under <b>Authentication → Users</b> in the Supabase dashboard.`
+        : `Couldn't reach Supabase${e.detail ? " — " + esc(e.detail) : ""}.`;
+    }
+  };
+
+  if ($("#sbSignOutBtn")) $("#sbSignOutBtn").onclick = () => {
+    sbSignOut(); renderSettings(); toast("Signed out");
+  };
+
+  if ($("#sbKeyBtn")) $("#sbKeyBtn").onclick = async () => {
+    const out = $("#sbKeyOut");
+    out.textContent = "Issuing…";
+    try {
+      const key = await sbIssueDeviceKey("iPhone");
+      /* Shown once, deliberately: only the hash is stored, so there is no
+         "show it again" to offer later. */
+      out.innerHTML = `<b>Copy this now — it won't be shown again:</b>
+        <code class="keyout">${esc(key)}</code>
+        Use it in the Shortcut as the <code>Authorization</code> header, as
+        <code>Bearer ${esc(key.slice(0, 6))}…</code>, posting to
+        <code>${esc(sbBase())}/functions/v1/activity</code>.`;
+    } catch (e) {
+      out.innerHTML = e.noSchema
+        ? "That project doesn't have Tally's tables yet — run <code>supabase/schema.sql</code> first."
+        : `Couldn't issue a key${e.detail ? " — " + esc(e.detail) : ""}.`;
+    }
+  };
 
   $("#exportBtn").onclick = () => {
     const blob = new Blob([JSON.stringify(S, null, 2)], { type: "application/json" });
@@ -1231,6 +1579,7 @@ function searchErrorText(err) {
 }
 
 function serverErrorText(err) {
+  if (backend() === "supabase") return supabaseErrorText(err);
   const base = esc(serverBase());
   switch (err.kind) {
     case "file":
@@ -1243,6 +1592,25 @@ function serverErrorText(err) {
       return `Your search server returned HTTP ${err.status}${err.detail ? " — " + esc(err.detail) : ""}.`;
     default:
       return `Couldn't reach your search server at <b>${base}</b>.<br>Check <code>offproxy</code> is running, that the URL is right, and that this page's origin is in its <code>OFFPROXY_ORIGINS</code> list.<br>Built-in foods still work.`;
+  }
+}
+
+function supabaseErrorText(err) {
+  switch (err.kind) {
+    case "file":
+      return "The app is running from a file on disk, so it can't call Supabase. It needs to be served over https.";
+    case "rate":
+      return "Pacing itself to stay inside Open Food Facts' published limits (10 searches a minute). Try again in a few seconds.";
+    case "upstream":
+      return `Supabase is up but couldn't get an answer from Open Food Facts${err.detail ? " — " + esc(err.detail) : ""}. Probably temporary.`;
+    case "nofunc":
+      return "The <code>off</code> function isn't deployed to this project yet — <code>supabase functions deploy off</code>.";
+    case "noua":
+      return "The <code>off</code> function has no contact address set. Add <code>OFF_USER_AGENT</code> to its secrets — Open Food Facts requires one.";
+    case "http":
+      return `Supabase returned HTTP ${err.status}${err.detail ? " — " + esc(err.detail) : ""}.`;
+    default:
+      return "Couldn't reach Supabase. If the project has been idle a week the free tier pauses it — open the dashboard and press Resume. Built-in foods still work.";
   }
 }
 
