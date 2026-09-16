@@ -6,9 +6,15 @@
 project_id = "tally"
 
 [functions.off]
-# Search costs your project's quota, so require a signed-in caller. The app
-# sends the user's access token; nobody else's requests get through.
-verify_jwt = true
+# Off, but the function is NOT open: it checks the caller's token against
+# GoTrue itself, in index.ts, and refuses anyone who isn't signed in.
+#
+# The platform's own check is the thing that can't be used here. It only
+# understands the legacy HS256 key format, so on a project using the newer
+# asymmetric signing keys — the default for new projects — it returns 401 for
+# valid access tokens before the function runs, with no logs to explain why.
+# Checking inside the function works with either key format.
+verify_jwt = false
 
 [functions.activity]
 # Off deliberately. An iOS Shortcut cannot refresh a JWT unattended, so this

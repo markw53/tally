@@ -19,8 +19,15 @@
 //   GET  /off?q=hovis+wholemeal&limit=20   -> { foods: [...] }
 //   GET  /off?code=5000169005460           -> { food: {...} }
 //
-// Requires a signed-in caller (verify_jwt stays on for this function), so it
-// isn't a free Open Food Facts proxy for the whole internet.
+// Requires a signed-in caller, so it isn't a free Open Food Facts proxy for
+// the whole internet — but it checks that itself rather than leaving it to the
+// platform's verify_jwt gateway. That check only understands the legacy HS256
+// key format, so on a project using the newer asymmetric signing keys (the
+// default for new projects) it rejects perfectly good access tokens with a 401
+// before the function ever runs. Doing it here works either way, and survives
+// the legacy anon key being retired at the end of 2026.
+//
+// So: deploy this with verify_jwt OFF.
 // ===========================================================================
 
 
@@ -101,6 +108,45 @@ async function cachePut(k: string, payload: unknown): Promise<void> {
   } catch (e) {
     console.warn("cache write failed:", e);
   }
+}
+
+/* ------------------------------------------------------------------ auth ---
+   Ask GoTrue who the bearer token belongs to. That's a real signature check
+   against whichever keys the project actually uses, rather than a guess at the
+   format — and it's the same answer the database would give.
+
+   Verified tokens are cached briefly so that typing in the search box doesn't
+   cost a round trip per keystroke. Never cached past the token's own expiry. */
+const seen = new Map<string, { id: string; until: number }>();
+const AUTH_TTL_MS = 5 * 60 * 1000;
+
+async function userFor(token: string): Promise<string | null> {
+  const now = Date.now();
+  const hit = seen.get(token);
+  if (hit && hit.until > now) return hit.id;
+
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) {
+    seen.delete(token);
+    return null;
+  }
+  const user = await res.json();
+  if (!user?.id) return null;
+
+  /* Don't hold a token past its own expiry: a signed-out session should stop
+     working here when it stops working everywhere else. */
+  let until = now + AUTH_TTL_MS;
+  try {
+    const exp = JSON.parse(atob(token.split(".")[1] ?? "")).exp;
+    if (typeof exp === "number") until = Math.min(until, exp * 1000);
+  } catch { /* not a JWT we can read; the short TTL still applies */ }
+
+  if (seen.size > 200) seen.clear();          // it's a cache, not a session store
+  seen.set(token, { id: user.id, until });
+  return user.id;
 }
 
 /* -------------------------------------------------------- food conversion --
@@ -255,6 +301,22 @@ Deno.serve(async (req) => {
   if (!UA.trim()) {
     return fail(req, 500, "NO_USER_AGENT",
       "OFF_USER_AGENT is not set on this function — see supabase/README.md");
+  }
+
+  /* Who's asking. Deliberately before anything that costs money or quota. */
+  const bearer = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) {
+    return fail(req, 401, "NO_AUTH", "sign in first — this endpoint isn't open");
+  }
+  let uid: string | null;
+  try {
+    uid = await userFor(bearer);
+  } catch (e) {
+    console.error("auth check failed:", e);
+    return fail(req, 503, "AUTH_UNAVAILABLE", "couldn't check your sign-in just now");
+  }
+  if (!uid) {
+    return fail(req, 401, "BAD_AUTH", "that sign-in wasn't accepted — sign in again");
   }
 
   const url = new URL(req.url);

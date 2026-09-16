@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -471,6 +471,7 @@ async function sbSearch(q, signal) {
     const e = new Error("search " + res.status);
     e.server = true; e.status = res.status; e.detail = detail;
     e.kind = res.status === 503 ? "rate" : (res.status === 404 ? "nofunc" : (res.status === 502 ? "upstream" : "http"));
+    if (res.status === 401) e.kind = code === "BAD_AUTH" || code === "NO_AUTH" ? "signedout" : "gatewayjwt";
     if (code === "NO_USER_AGENT") e.kind = "noua";
     throw e;
   }
@@ -1634,6 +1635,13 @@ function supabaseErrorText(err) {
       return `Supabase is up but couldn't get an answer from Open Food Facts${err.detail ? " — " + esc(err.detail) : ""}. Probably temporary.`;
     case "nofunc":
       return "The <code>off</code> function isn't deployed to this project yet — <code>supabase functions deploy off</code>.";
+    case "signedout":
+      return "Supabase didn't accept this session for search. Sign out and back in under <b>More \u2192 Sync</b>.";
+    case "gatewayjwt":
+      /* A 401 that didn't come from the function's own auth check came from
+         the platform gateway in front of it, which only understands the legacy
+         key format. Naming the toggle saves a long hunt. */
+      return "Supabase rejected the request before the function ran. Turn <b>Verify JWT</b> <b>off</b> on the <code>off</code> function \u2014 the built-in check can't read this project's signing keys. The function does its own sign-in check instead.";
     case "noua":
       return "The <code>off</code> function has no contact address set. Add <code>OFF_USER_AGENT</code> to its secrets — Open Food Facts requires one.";
     case "http":

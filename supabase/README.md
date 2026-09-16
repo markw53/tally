@@ -104,17 +104,23 @@ Dashboard → **Edge Functions** → **Deploy a new function** → **Via Editor*
    Deploy.
 2. New function, name it `activity`, paste
    [`functions/activity/index.ts`](functions/activity/index.ts). Deploy.
-3. Open the `activity` function's settings and turn **Verify JWT** **off**.
-   Leave it on for `off`.
+3. Open **each** function's settings and turn **Verify JWT** **off**. Both of
+   them.
 
-That last step matters in both directions, so it's worth being deliberate
-about:
+That third step is not optional, and it is not a way of leaving the door open
+— both functions check their caller themselves. Why the built-in one is no use
+here:
 
-- **`activity` must have it off.** An iOS Shortcut can't refresh a JWT, so the
-  function does its own authentication against a hashed device key. With JWT
-  verification on, Apple Health simply never lands.
-- **`off` must have it on.** It's the only thing stopping your project's
-  Open Food Facts quota being a free proxy for anyone who finds the URL.
+- **`off`** would be rejected by it. The platform's check only understands the
+  legacy HS256 key format, so on a project using the newer asymmetric signing
+  keys — the default for new projects — it returns **401** for perfectly valid
+  access tokens, before the function runs and with nothing in the logs to say
+  why. The function instead asks GoTrue who the token belongs to, which works
+  with either key format and will survive the legacy anon key being retired at
+  the end of 2026. Anyone not signed in still gets a 401 from the function.
+- **`activity`** can't use it at all. An iOS Shortcut has nowhere to keep a
+  refreshable session, so it authenticates with a hashed device key instead.
+  With the built-in check on, Apple Health simply never lands.
 
 The dashboard editor has no version history, so treat the repo as the
 original and the dashboard as a copy of it.
@@ -140,8 +146,9 @@ supabase functions deploy off
 supabase functions deploy activity
 ```
 
-`config.toml` sets `verify_jwt` correctly for each, so route B needs no
-equivalent of step A3.
+`config.toml` sets `verify_jwt = false` on both, for the reasons in route A, so
+the CLI needs no equivalent of step A3. If you'd rather be explicit:
+`supabase functions deploy off --no-verify-jwt`.
 
 To update later, `supabase functions deploy <name>` again. The CLI also takes
 the secrets if you'd rather not use the dashboard:
@@ -263,12 +270,19 @@ that Claire cannot read, write or delete Mark's diary by any route including
 aiming directly at his rows, that a stale device can't resurrect a deleted food,
 and that a syncing client cannot touch watch data.
 
-The edge function's pure half — converting an Open Food Facts product, and the
-re-ranking that puts the actual Hovis loaf above Mission wraps — has its own:
+The edge functions have their own, which run the real handler under Node with
+Deno and the network stubbed:
 
 ```bash
-node --experimental-strip-types supabase/test/food.test.mjs
+node --experimental-strip-types supabase/test/food.test.mjs   # conversion, ranking
+node --experimental-strip-types supabase/test/off.test.mjs    # the auth gate, CORS
 ```
+
+The second matters more than it looks. Since the platform's `verify_jwt` can't
+be used here, "you have to be signed in to use this" rests entirely on the
+function's own check — so that check is tested, including that a refused caller
+never reaches Open Food Facts and that an expired token isn't served from the
+verification cache.
 
 ---
 
@@ -294,7 +308,9 @@ test/                   schema tests against a local Postgres, plus the above
 | Sign-in rejected | the account doesn't exist — create it in Authentication → Users |
 | "The `off` function isn't deployed" | step 6 — deploy it, and check the name is exactly `off` |
 | "no contact address set" | `OFF_USER_AGENT` secret missing (step 5) |
+| Search says Supabase rejected it before the function ran | Verify JWT is still on for `off` — step A3. The built-in check can't read newer projects' signing keys |
 | Apple Health posts return 401 | `activity` still has Verify JWT on — step A3 |
+| Search says the session wasn't accepted | sign out and back in under More → Sync |
 | Search works, the browser console shows CORS | `ALLOWED_ORIGINS` doesn't match where the app is served from |
 | Everything stops after a break | the project paused — dashboard → Resume |
 | The Shortcut posts but nothing appears | check the date it sent; it should be *your* today |

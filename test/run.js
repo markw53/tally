@@ -6,9 +6,11 @@ const URL = "http://127.0.0.1:8765/";
 let pass = 0, fail = 0;
 const errors = [];
 
+const failures = [];
 function ok(name, cond, extra) {
+  const label = name + (extra ? "  → " + extra : "");
   if (cond) { pass++; console.log("  ✓ " + name); }
-  else { fail++; console.log("  ✗ " + name + (extra ? "  → " + extra : "")); }
+  else { fail++; failures.push(label); console.log("  ✗ " + label); }
 }
 
 (async () => {
@@ -1095,6 +1097,12 @@ function ok(name, cond, extra) {
   const real = errors.filter(e => !/favicon/i.test(e) && !/^Failed to load resource/i.test(e));
   ok("no uncaught console errors", real.length === 0, real.slice(0, 5).join(" | "));
 
+  /* Repeat the failures at the end. A ✗ scrolled off in the middle of 145
+     lines is easy to miss, and piping to `tail` hides it completely. */
+  if (failures.length) {
+    console.log("\nFailed:");
+    failures.forEach(f => console.log("  ✗ " + f));
+  }
   console.log(`\n${pass} passed, ${fail} failed\n`);
   process.exit(fail ? 1 : 0);
 })().catch(e => { console.error("HARNESS ERROR", e); process.exit(2); });

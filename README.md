@@ -284,6 +284,7 @@ account:
 cd server && go test ./...                                   # 33
 ./supabase/test/run.sh                                       # schema + RLS
 node --experimental-strip-types supabase/test/food.test.mjs  # 19
+node --experimental-strip-types supabase/test/off.test.mjs    # 17
 ```
 
 ---
