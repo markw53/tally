@@ -1,6 +1,6 @@
 /* Headless smoke + behaviour tests for Tally.
    Run:  node test/run.js     (with a static server on :8765) */
-const { chromium } = require("playwright");
+const { chromium, devices } = require("playwright");
 
 const URL = "http://127.0.0.1:8765/";
 let pass = 0, fail = 0;
@@ -946,6 +946,116 @@ function ok(name, cond, extra) {
        (await p7.locator("#sumFood").textContent()) === "420");
 
     await ctx7.close();
+  }
+
+  console.log("\n— what a phone does to pasted config —");
+  {
+    const ctx8 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const p8 = await ctx8.newPage();
+    p8.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+    await p8.goto(URL, { waitUntil: "networkidle" });
+
+    const norm = (v) => p8.evaluate((x) => normaliseSbUrl(x), v);
+
+    // iOS capitalises the first letter of a text input by default
+    ok("a capitalised scheme is accepted",
+       await norm("Https://abcdefgh.supabase.co") === "https://abcdefgh.supabase.co");
+    // autocorrect and copy/paste leave whitespace behind
+    ok("surrounding whitespace and newlines are stripped",
+       await norm("  https://abcdefgh.supabase.co\n") === "https://abcdefgh.supabase.co");
+    // a zero-width character from a dashboard copy is invisible to the eye
+    ok("zero-width characters are stripped",
+       await norm("https://abcdefgh.supabase.co​") === "https://abcdefgh.supabase.co");
+    ok("a bare hostname gets a scheme",
+       await norm("abcdefgh.supabase.co") === "https://abcdefgh.supabase.co");
+    ok("a trailing slash doesn't matter",
+       await norm("https://abcdefgh.supabase.co/") === "https://abcdefgh.supabase.co");
+    // the dashboard shows the REST endpoint next to the key, so people paste it
+    ok("the REST endpoint is trimmed back to the project",
+       await norm("https://abcdefgh.supabase.co/rest/v1") === "https://abcdefgh.supabase.co");
+    ok("so is the auth one",
+       await norm("https://abcdefgh.supabase.co/auth/v1/") === "https://abcdefgh.supabase.co");
+    ok("empty stays empty", await norm("   ") === "");
+
+    // and it still refuses something that plainly isn't a URL, out loud
+    await p8.click('.tab[data-view="settings"]');
+    await p8.fill("#setSbUrl", "my project");
+    await p8.click("#saveSb");
+    await p8.waitForTimeout(250);
+    ok("obvious nonsense is still rejected",
+       /doesn't look like the project URL/.test(await p8.locator("#sbOut").textContent()));
+    ok("and says so in a toast too, not only below the fold",
+       await p8.locator("#toast").isVisible());
+
+    // none of the config fields should be autocapitalised by the phone
+    const caps = await p8.evaluate(() =>
+      ["setServer", "setUsda", "setSbUrl", "setSbKey"]
+        .filter(id => document.getElementById(id) &&
+                      document.getElementById(id).getAttribute("autocapitalize") !== "off"));
+    ok("config inputs opt out of autocapitalisation", caps.length === 0, caps.join(", "));
+
+    await ctx8.close();
+  }
+
+  console.log("\n— the toast must not eat taps —");
+  {
+    /* A fixed bar across the bottom of the screen with default pointer events
+       silently swallows every tap landing under it. On a desktop the buttons
+       are rarely down there; on a phone that's exactly where they are. */
+    const ctx9 = await browser.newContext({ ...devices["iPhone 13"] });
+    const p9 = await ctx9.newPage();
+    p9.on("pageerror", e => errors.push("PAGEERROR: " + e.message));
+    await p9.goto(URL, { waitUntil: "networkidle" });
+    await p9.click('.tab[data-view="settings"]');
+    await p9.evaluate(() => toast("Saved"));
+    await p9.waitForTimeout(150);
+
+    const tbox = await p9.locator("#toast").boundingBox();
+    const scroller = p9.locator("#view-settings .scroll");
+
+    /* Put the Save button squarely in the middle of the toast band rather than
+       scrolling about hoping to land on it — a test that silently fails to
+       reach the condition it's checking is worse than no test. */
+    const bandMid = tbox.y + tbox.height / 2;
+    await scroller.evaluate((el, target) => {
+      const b = document.getElementById("saveSb").getBoundingClientRect();
+      el.scrollTop += (b.top + b.height / 2) - target;
+    }, bandMid);
+    await p9.waitForTimeout(150);
+
+    const box = await p9.locator("#saveSb").boundingBox();
+    const cy = box.y + box.height / 2;
+    ok("a button really is under the toast for this test",
+       cy > tbox.y && cy < tbox.y + tbox.height,
+       `button centre ${Math.round(cy)}, band ${Math.round(tbox.y)}-${Math.round(tbox.y + tbox.height)}`);
+
+    const hit = await p9.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      return el && el.closest("#toast") ? "TOAST" : (el && el.id) || "?";
+    }, { x: box.x + box.width / 2, y: cy });
+    ok("the toast doesn't intercept taps meant for it", hit !== "TOAST", "tap landed on: " + hit);
+
+    /* Tap the coordinate rather than the element: locator.click() scrolls the
+       button into view first, which is exactly the thing a finger can't do,
+       and would pass even with the toast swallowing the tap. */
+    await p9.fill("#setSbUrl", "https://tapthrough.supabase.co");
+    await p9.evaluate(() => toast("Saved"));
+    await p9.waitForTimeout(120);
+    const box2 = await p9.locator("#saveSb").boundingBox();
+    await p9.mouse.click(box2.x + box2.width / 2, box2.y + box2.height / 2);
+    await p9.waitForTimeout(250);
+    ok("and a tap at its coordinates still saves",
+       await p9.evaluate(() => S.sbUrl) === "https://tapthrough.supabase.co",
+       JSON.stringify(await p9.evaluate(() => S.sbUrl)));
+
+    // ...but its own action must still work, or Undo becomes undoable
+    await p9.evaluate(() => toast("Added", "Undo", () => { window.__undone = true; }));
+    await p9.waitForTimeout(150);
+    await p9.locator("#toastAction").click();
+    await p9.waitForTimeout(100);
+    ok("the toast's own action is still tappable", await p9.evaluate(() => window.__undone === true));
+
+    await ctx9.close();
   }
 
   console.log("\n— export —");

@@ -1,5 +1,5 @@
 /* Tally service worker — app shell offline, network-first for food data. */
-const CACHE = "tally-v1.5.0";
+const CACHE = "tally-v1.5.1";
 const SHELL = [
   "./",
   "./index.html",

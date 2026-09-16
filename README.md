@@ -23,7 +23,7 @@ icons/                app icons
 server/               optional Open Food Facts search service (Go)
 supabase/             optional sync on Supabase's free tier — schema + 2 functions
 tools/                regenerate foods-uk.js from the published CoFID spreadsheet
-test/run.js           130 headless tests
+test/run.js           145 headless tests
 ```
 
 Every path in the project is relative, so it works served from a domain root
@@ -108,7 +108,7 @@ launch, not the current one. If you want it immediately, bump the version
 string at the top of `sw.js`:
 
 ```js
-const CACHE = "tally-v1.4.1";   // any change to this forces a full refresh
+const CACHE = "tally-v1.5.2";   // any change to this forces a full refresh
 ```
 
 ### One thing to know before you pick
@@ -274,7 +274,7 @@ python3 -m http.server 8765     # in this folder
 node test/run.js                # needs playwright
 ```
 
-130 tests covering portion arithmetic, the diary, editing, undo, persistence,
+145 tests covering portion arithmetic, the diary, editing, undo, persistence,
 the barcode path, both sync backends, and the layout.
 
 The optional pieces carry their own, none of which need a network or an
@@ -283,7 +283,7 @@ account:
 ```bash
 cd server && go test ./...                                   # 33
 ./supabase/test/run.sh                                       # schema + RLS
-node --experimental-strip-types supabase/test/food.test.mjs  # 18
+node --experimental-strip-types supabase/test/food.test.mjs  # 19
 ```
 
 ---

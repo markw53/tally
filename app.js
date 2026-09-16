@@ -5,7 +5,7 @@
    reference foods from USDA FoodData Central.
    ============================================================ */
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 const MEALS = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 const OFF_FIELDS = "code,product_name,product_name_en,generic_name,brands,quantity,product_quantity,serving_size,serving_quantity,nutriments,nutrition_data_per,image_front_small_url";
 const USDA_DEMO = "DEMO_KEY";
@@ -291,7 +291,31 @@ function normaliseFood(f) {
    address means offproxy, otherwise neither.
    ============================================================ */
 
-function sbBase() { return (S.sbUrl || "").trim().replace(/\/+$/, ""); }
+/* Phones are hostile to pasted configuration. iOS capitalises the first letter
+   of a text field by default, autocorrect adds trailing spaces, and copying
+   from a dashboard often brings a newline or a zero-width character along. All
+   of that is recoverable, so recover from it rather than leaving someone
+   hunting for an invisible character on a six-inch screen. */
+function cleanSecret(v) {
+  return String(v || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")   // zero-width junk from copy/paste
+    .replace(/\s+/g, "")                      // keys and URLs never contain spaces
+    .trim();
+}
+
+function normaliseSbUrl(v) {
+  let u = cleanSecret(v);
+  if (!u) return "";
+  u = u.replace(/^([A-Za-z]+):\/\//, (m, sch) => sch.toLowerCase() + "://");  // "Https://"
+  if (!/^https?:\/\//.test(u)) u = "https://" + u;                           // bare hostname
+  u = u.replace(/^http:\/\//, "https://");                                   // Supabase is TLS only
+  /* People reasonably paste the REST or auth endpoint rather than the project
+     root, since that's what the dashboard shows beside the key. */
+  u = u.replace(/\/(rest|auth|functions|storage|realtime)\/v\d.*$/, "");
+  return u.replace(/\/+$/, "");
+}
+
+function sbBase() { return normaliseSbUrl(S.sbUrl); }
 function sbConfigured() { return !!(sbBase() && (S.sbKey || "").trim()); }
 
 function backend() {
@@ -1105,7 +1129,7 @@ function supabaseSyncCard() {
     return `
       <p>Sign in as ${esc(profileLabel())}. Each person signs in as themselves — diaries are separate, the food library is shared.</p>
       <label class="fld"><span>Email</span>
-        <input type="email" id="sbEmail" autocomplete="username" spellcheck="false" inputmode="email" placeholder="you@example.com"></label>
+        <input type="email" id="sbEmail" autocomplete="username" spellcheck="false" inputmode="email" placeholder="you@example.com" autocapitalize="off" autocorrect="off"></label>
       <label class="fld"><span>Password</span>
         <input type="password" id="sbPass" autocomplete="current-password"></label>
       <div class="btnrow">
@@ -1174,10 +1198,10 @@ function renderSettings() {
       <h3>Food search</h3>
       <p>Neither of these is needed. Typed search already covers ~2,900 UK foods from McCance &amp; Widdowson, offline, and barcodes come from Open Food Facts. These only add <em>more</em> results.</p>
       <label class="fld"><span>Your search server (offproxy)</span>
-        <input type="text" id="setServer" value="${esc(S.serverUrl)}" placeholder="https://tally.yourdomain.com" autocomplete="off" spellcheck="false" inputmode="url"></label>
+        <input type="text" id="setServer" value="${esc(S.serverUrl)}" placeholder="https://tally.yourdomain.com" autocomplete="off" spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"></label>
       <p>Set this and typed search comes from Open Food Facts itself, via your own server — better UK coverage than USDA, and barcode lookups route through it too. Leave it empty to use USDA instead.</p>
       <label class="fld"><span>USDA API key ${serverBase() ? "(unused while a server is set)" : "(optional extra)"}</span>
-        <input type="text" id="setUsda" value="${esc(S.usdaKey)}" placeholder="${USDA_DEMO}" autocomplete="off" spellcheck="false"></label>
+        <input type="text" id="setUsda" value="${esc(S.usdaKey)}" placeholder="${USDA_DEMO}" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"></label>
       <p>Adds American generic foods on top of the UK data. Free key, about a minute: <a href="https://fdc.nal.usda.gov/api-key-signup.html" target="_blank" rel="noopener">fdc.nal.usda.gov</a>.</p>
       <p><b>You probably don't need this.</b> The UK data covers typed search on its own, and USDA's endpoint is intermittently unreliable. Clearing this box makes typed search entirely offline.</p>
       <div class="btnrow">
@@ -1211,7 +1235,7 @@ function renderSettings() {
       <p>${esc(syncSummary())}</p>
       ${backend() === "supabase" ? supabaseSyncCard() : `
       <label class="fld"><span>Sync token for ${esc(profileLabel())}</span>
-        <input type="password" id="setToken" value="${esc(activeProfile().token || "")}" placeholder="paste the token from OFFPROXY_ACCOUNTS" autocomplete="off" spellcheck="false"></label>
+        <input type="password" id="setToken" value="${esc(activeProfile().token || "")}" placeholder="paste the token from OFFPROXY_ACCOUNTS" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"></label>
       <p>Generate one on the server with <code>offproxy -gen-token</code>, add it to <code>OFFPROXY_ACCOUNTS</code>, and paste the same value here. Without a token this profile stays on this device.</p>
       <div class="btnrow">
         <button class="primary" id="saveToken">Save token</button>
@@ -1223,9 +1247,9 @@ function renderSettings() {
       <h3>Supabase</h3>
       <p>The other way to sync, with nothing of your own left running. Supabase's free tier covers a household comfortably — see <code>supabase/README.md</code> for the ten-minute setup.</p>
       <label class="fld"><span>Project URL</span>
-        <input type="text" id="setSbUrl" value="${esc(S.sbUrl)}" placeholder="https://abcdefgh.supabase.co" autocomplete="off" spellcheck="false" inputmode="url"></label>
+        <input type="text" id="setSbUrl" value="${esc(S.sbUrl)}" placeholder="https://abcdefgh.supabase.co" autocomplete="off" spellcheck="false" inputmode="url" autocapitalize="off" autocorrect="off"></label>
       <label class="fld"><span>Anon key</span>
-        <input type="text" id="setSbKey" value="${esc(S.sbKey)}" placeholder="eyJhbGciOi..." autocomplete="off" spellcheck="false"></label>
+        <input type="text" id="setSbKey" value="${esc(S.sbKey)}" placeholder="eyJhbGciOi..." autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off"></label>
       <p>Both are on the project's API settings page. The anon key is meant to be public — it's row-level security, not this key, that keeps your diary private.</p>
       <div class="btnrow">
         <button class="primary" id="saveSb">Save</button>
@@ -1351,10 +1375,15 @@ function renderSettings() {
 
   /* --- supabase --- */
   $("#saveSb").onclick = () => {
-    const url = $("#setSbUrl").value.trim().replace(/\/+$/, "");
-    const key = $("#setSbKey").value.trim();
-    if (url && !/^https:\/\/[^\s/]+/.test(url)) {
-      $("#sbOut").textContent = "That should be the https:// project URL from your API settings.";
+    const url = normaliseSbUrl($("#setSbUrl").value);
+    const key = cleanSecret($("#setSbKey").value);
+    if (url && !/^https:\/\/[^\s/]+\.[^\s/]+/.test(url)) {
+      /* Inline *and* a toast, because on a phone this message can render below
+         the fold — and a validation failure you can't see is indistinguishable
+         from a button that does nothing. */
+      $("#sbOut").textContent = "That doesn't look like the project URL. It's the https://….supabase.co one on the API settings page.";
+      $("#sbOut").scrollIntoView({ block: "center", behavior: "smooth" });
+      toast("Check the project URL");
       return;
     }
     S.sbUrl = url; S.sbKey = key;

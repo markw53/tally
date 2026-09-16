@@ -276,10 +276,15 @@ label.fld span{display:block; font-size:.8rem; color:var(--ink-2); margin-bottom
   background:var(--ink); color:var(--bg); border-radius:var(--r-sm);
   padding:13px 15px; display:flex; align-items:center; gap:12px;
   font-size:.9rem; box-shadow:var(--shadow); animation:up .2s ease;
+  /* A toast is something you read, not something you tap. Without this it's a
+     fixed bar across the bottom of the screen that silently eats every tap
+     landing under it for the next few seconds — which on a phone is wherever
+     the button you just aimed at happens to be. Only the action opts back in. */
+  pointer-events:none;
 }
 .toast[hidden]{display:none}
 .toast span{flex:1}
-.toast button{color:var(--accent); font-weight:700; flex:none}
+.toast button{color:var(--accent); font-weight:700; flex:none; pointer-events:auto}
 
 /* Inline code is mostly URLs, env-var names and endpoints, all of which are
    longer than a phone is wide. Let them break rather than run off the edge —
