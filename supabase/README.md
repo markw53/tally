@@ -127,8 +127,9 @@ original and the dashboard as a copy of it.
 
 #### B — with the CLI
 
-On Fedora, install from the released RPM rather than npm:
+Install it without npm — Supabase ships real packages.
 
+**Fedora:**
 ```bash
 V=2.117.0
 curl -LO https://github.com/supabase/cli/releases/download/v$V/supabase_${V}_linux_amd64.rpm
@@ -136,12 +137,25 @@ sudo dnf install ./supabase_${V}_linux_amd64.rpm
 supabase --version
 ```
 
+**Windows**, via Scoop:
+```powershell
+scoop bucket add supabase https://github.com/supabase/scoop-bucket.git
+scoop install supabase
+```
+or unzip `supabase_2.117.0_windows_amd64.zip` from the same releases page and
+put `supabase.exe` somewhere on your PATH.
+
 Then:
 
 ```bash
-cd supabase
 supabase login
+
+# Run this from the tally folder itself — the one CONTAINING supabase/,
+# not from inside it. The CLI looks for supabase/config.toml relative to
+# where you are.
+cd /path/to/tally
 supabase link --project-ref <your project ref>
+
 supabase functions deploy off
 supabase functions deploy activity
 ```

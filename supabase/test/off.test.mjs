@@ -71,7 +71,13 @@ globalThis.fetch = async (url, init = {}) => {
   throw new Error("unexpected fetch: " + u);
 };
 
-await import("../functions/off/index.ts");
+/* Test whichever copy is asked for. The dashboard bundle is what gets pasted
+   into the editor, so it is the file that actually runs for anyone who
+   deployed without the CLI — testing only the source would miss a bundler bug
+   entirely. */
+const TARGET = process.env.OFF_TARGET ?? "../functions/off/index.ts";
+await import(TARGET);
+console.log("  (testing " + TARGET + ")");
 
 const call = (path, headers = {}) =>
   handler(new Request("https://proj.supabase.co/functions/v1/" + path, { headers }));
